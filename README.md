@@ -2,8 +2,10 @@
 
 WSL (Ubuntu) のターミナルで動く、Gemini を使った対話型コーディングエージェント CLI。
 
-[nlink-jp/gem-agent](https://github.com/nlink-jp/gem-agent) を参考にしていますが、あちらが Go 製・macOS (Apple Silicon) 向け・Vertex AI 前提なのに対し、
-こちらは **Node.js/TypeScript 製・WSL/Linux 向け・Gemini API キーと Vertex AI の両対応** として作り直したものです。
+[nlink-jp/gem-agent](https://github.com/nlink-jp/gem-agent) を参考に、あちらが Go 製・macOS (Apple Silicon) 向けなのに対して
+**Node.js/TypeScript 製・WSL/Linux 向け**として作り直したものです。
+認証は gem-agent と同じ **Vertex AI + ADC (`gcloud auth application-default login`) が既定**で、
+GCP を用意せず手軽に試したいとき用に Gemini API キーへ切り替えることもできます。
 
 ```
 ❯ src/ 以下の型エラーを直して
@@ -24,14 +26,24 @@ WSL (Ubuntu) のターミナルで動く、Gemini を使った対話型コーデ
 - WSL2 上の Ubuntu (素の Linux / macOS でも動きます)
 - Node.js 22 以上
 - 以下のどちらかの認証
-  - **Gemini API キー** — [Google AI Studio](https://aistudio.google.com/apikey) で発行。無料枠あり。**こちらが簡単です**
-  - **Vertex AI** — GCP プロジェクト + `gcloud auth application-default login`
+  - **Vertex AI + ADC (既定)** — GCP プロジェクト + `gcloud auth application-default login`
+  - **Gemini API キー** — [Google AI Studio](https://aistudio.google.com/apikey) で発行。GCP 不要・無料枠あり
 
 Node.js が未導入なら:
 
 ```bash
 curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
 sudo apt-get install -y nodejs
+```
+
+gcloud CLI が未導入なら:
+
+```bash
+curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg \
+  | sudo gpg --dearmor -o /usr/share/keyrings/cloud.google.gpg
+echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" \
+  | sudo tee /etc/apt/sources.list.d/google-cloud-sdk.list
+sudo apt-get update && sudo apt-get install -y google-cloud-cli
 ```
 
 ## インストール
@@ -52,32 +64,53 @@ cd ~/gemini-agent
 
 ## 認証の設定
 
-### A. Gemini API キー (推奨)
-
-```bash
-mkdir -p ~/.config/gema
-echo 'GEMINI_API_KEY=AIza...' > ~/.config/gema/.env
-chmod 600 ~/.config/gema/.env
-```
-
-プロジェクトごとに変えたい場合は、そのディレクトリ直下の `.env` に書けばそちらが優先されます
-(`.env` は `.gitignore` に入れてください)。
-
-### B. Vertex AI
+### A. Vertex AI + ADC (既定 / gem-agent と同じ方式)
 
 ```bash
 gcloud auth application-default login --no-launch-browser
 gcloud config set project <your-project-id>
 gcloud services enable aiplatform.googleapis.com
-
-cat >> ~/.config/gema/.env <<'EOF'
-GOOGLE_GENAI_USE_VERTEXAI=true
-GOOGLE_CLOUD_PROJECT=<your-project-id>
-GOOGLE_CLOUD_LOCATION=global
-EOF
 ```
 
-一時的に切り替えるだけなら `gema --auth vertex --project <id>` でも構いません。
+これだけで `gema` が使えます。**プロジェクト ID は `gcloud config get-value project` から自動で引き継ぐ**ため、
+環境変数も設定ファイルも書く必要はありません。
+
+gcloud の既定と別のプロジェクトを使いたい場合だけ、明示してください。
+
+```bash
+gema --project <other-project-id>          # 一時的に
+echo 'GOOGLE_CLOUD_PROJECT=<id>' >> ~/.config/gema/.env   # 恒久的に
+```
+
+ロケーションの既定は `global` です。Gemini 3 系は `global` が必須、2.5 系なら `--location us-central1` のような
+地域指定もできます (この扱いは gem-agent と同じです)。
+
+必要な IAM ロールは `roles/aiplatform.user` です。
+
+### B. Gemini API キー (GCP を使わない簡易モード)
+
+[Google AI Studio](https://aistudio.google.com/apikey) でキーを発行して:
+
+```bash
+mkdir -p ~/.config/gema
+cat > ~/.config/gema/.env <<'EOF'
+GOOGLE_GENAI_USE_VERTEXAI=false
+GEMINI_API_KEY=AIza...
+EOF
+chmod 600 ~/.config/gema/.env
+```
+
+一時的に切り替えるだけなら `gema --auth apikey` でも構いません。
+プロジェクトごとに変えたい場合は、そのディレクトリ直下の `.env` が優先されます
+(`.env` は `.gitignore` に入れてください)。
+
+### 切り替えの優先順位
+
+`--auth` / `--project` → `GOOGLE_GENAI_USE_VERTEXAI` → `.gema/config.json` → `~/.config/gema/config.json` → 既定 (vertex)。
+
+どこでも明示していない場合に限り、材料が揃っている方へ自動で倒します
+(GCP プロジェクトが見つからず `GEMINI_API_KEY` だけある → API キーモード、など)。
+現在の接続先は起動時のヘッダーか `/auth` で確認できます。
 
 ## 使い方
 
@@ -88,6 +121,7 @@ cat spec.md | gema -p         # 標準入力を指示として渡す
 gema -C ~/work/myapp          # 作業ディレクトリを指定して起動
 gema --continue               # 直前のセッションを復元して起動
 gema --model gemini-3.1-pro-preview
+gema --auth apikey            # 一時的に API キーモードで起動
 ```
 
 入力中に `@src/foo.ts` と書くと、そのファイルの内容が自動で添付されます (Tab で補完できます)。
@@ -161,9 +195,9 @@ mkdir -p ~/.config/gema && cp .gema/config.example.json ~/.config/gema/config.js
 
 | 変数 | 意味 |
 | --- | --- |
+| `GOOGLE_GENAI_USE_VERTEXAI` | `false` で API キーモードに切替 (既定は Vertex AI) |
+| `GOOGLE_CLOUD_PROJECT` / `GOOGLE_CLOUD_LOCATION` | Vertex AI の宛先 (未設定なら gcloud の既定を使用) |
 | `GEMINI_API_KEY` / `GOOGLE_API_KEY` | Gemini API キー |
-| `GOOGLE_GENAI_USE_VERTEXAI` | `true` で Vertex AI モード |
-| `GOOGLE_CLOUD_PROJECT` / `GOOGLE_CLOUD_LOCATION` | Vertex AI の宛先 |
 | `GEMA_MODEL` | 既定モデル |
 | `GEMA_THINKING` | `MINIMAL` / `LOW` / `MEDIUM` / `HIGH` |
 
@@ -205,10 +239,24 @@ export HTTPS_PROXY=http://proxy.example.com:8080
 npm config get prefix         # 出たパスの bin が PATH にあるか確認
 ```
 
-**Vertex AI で `Could not load the default credentials`**
+**`Could not load the default credentials`** — ADC が未設定か期限切れです。
 
 ```bash
 gcloud auth application-default login --no-launch-browser
+```
+
+**`Vertex AI を使う GCP プロジェクトが特定できません`** — gcloud の既定プロジェクトが未設定です。
+
+```bash
+gcloud config set project <your-project-id>
+gcloud config get-value project    # 反映を確認
+```
+
+**`PERMISSION_DENIED` / `403`** — Vertex AI API が無効か、ロールが足りません。
+
+```bash
+gcloud services enable aiplatform.googleapis.com
+# 必要なロール: roles/aiplatform.user
 ```
 
 ## 開発
@@ -240,7 +288,7 @@ src/
 
 実装済み: 対話 REPL、ストリーミング応答、ファイル操作・検索・シェル実行ツール、承認ゲート、
 セッション保存と復元、スラッシュコマンド、Tab 補完、`@file` 添付、プロジェクト指示ファイル、
-Gemini API / Vertex AI の切り替え。
+Vertex AI (既定) と Gemini API キーの切り替え。
 
 未実装 (参考にした gem-agent にはあるもの): Web 検索・取得、画像や PDF などマルチモーダル入力、
 MCP サーバー連携、コンテキストの自動圧縮、サンドボックス実行。

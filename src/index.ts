@@ -26,7 +26,7 @@ ${c.bold('使い方')}
 ${c.bold('オプション')}
   -p, --print [prompt]        非対話モード。prompt 省略時は標準入力を読む
   -m, --model <id>            使用するモデル (例: gemini-3.7-flash)
-      --auth <apikey|vertex>  認証方式を明示指定
+      --auth <vertex|apikey>  認証方式を明示指定 (既定: vertex)
       --project <id>          Vertex AI の GCP プロジェクト ID
       --location <loc>        Vertex AI のロケーション (既定: global)
       --think <LEVEL>         思考量: MINIMAL / LOW / MEDIUM / HIGH
@@ -41,9 +41,15 @@ ${c.bold('オプション')}
   -v, --version               バージョン
 
 ${c.bold('認証')}
-  A) Gemini API キー   .env に GEMINI_API_KEY=... (https://aistudio.google.com/apikey)
-  B) Vertex AI         GOOGLE_GENAI_USE_VERTEXAI=true + GOOGLE_CLOUD_PROJECT
-                       事前に  gcloud auth application-default login
+  既定は Vertex AI + ADC です。事前に以下を済ませてください。
+    gcloud auth application-default login --no-launch-browser
+    gcloud config set project <your-project-id>
+    gcloud services enable aiplatform.googleapis.com
+  プロジェクト ID は gcloud の既定値を自動で引き継ぎます (GOOGLE_CLOUD_PROJECT で上書き可)。
+
+  API キー (Google AI Studio) で手軽に使う場合:
+    gema --auth apikey            # 一時的に切り替え
+    GEMINI_API_KEY=... を .env に書き、GOOGLE_GENAI_USE_VERTEXAI=false で既定化
 `;
 
 interface Cli {

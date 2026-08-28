@@ -255,7 +255,7 @@ export class Repl {
       case '/config':
         line();
         for (const [k, v] of Object.entries(config)) {
-          if (k === 'apiKey') continue;
+          if (k === 'apiKey' || k.startsWith('_')) continue;
           line(`  ${c.cyan(k.padEnd(22))} ${Array.isArray(v) ? v.join(', ') : String(v)}`);
         }
         line();

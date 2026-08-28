@@ -33,11 +33,35 @@ fi
 echo
 echo "完了しました。"
 echo
-if [ ! -f .env ] && [ ! -f "${XDG_CONFIG_HOME:-$HOME/.config}/gema/.env" ]; then
-  echo "次に API キーを設定してください:"
-  echo "  mkdir -p ~/.config/gema"
-  echo "  echo 'GEMINI_API_KEY=<https://aistudio.google.com/apikey で発行したキー>' > ~/.config/gema/.env"
+
+CONFIG_ENV="${XDG_CONFIG_HOME:-$HOME/.config}/gema/.env"
+
+if command -v gcloud >/dev/null 2>&1; then
+  PROJECT="$(gcloud config get-value project 2>/dev/null || true)"
+  if [ -z "$PROJECT" ] || [ "$PROJECT" = "(unset)" ]; then
+    echo "次に Vertex AI の認証を済ませてください:"
+    echo "  gcloud auth application-default login --no-launch-browser"
+    echo "  gcloud config set project <your-project-id>"
+    echo "  gcloud services enable aiplatform.googleapis.com"
+    echo
+  else
+    echo "gcloud の既定プロジェクト: $PROJECT"
+    if [ ! -f "$HOME/.config/gcloud/application_default_credentials.json" ]; then
+      echo "ADC が未設定です。以下を実行してください:"
+      echo "  gcloud auth application-default login --no-launch-browser"
+      echo
+    fi
+  fi
+else
+  echo "gcloud CLI が見つかりません。既定の Vertex AI モードには gcloud が必要です:"
+  echo "  https://cloud.google.com/sdk/docs/install#deb"
+  echo
+  echo "GCP を使わず API キーで手軽に始める場合:"
+  echo "  mkdir -p \"$(dirname "$CONFIG_ENV")\""
+  echo "  printf 'GOOGLE_GENAI_USE_VERTEXAI=false\\nGEMINI_API_KEY=<AI Studio のキー>\\n' > \"$CONFIG_ENV\""
   echo
 fi
+
 echo "使い方:  gema          (対話モード)"
 echo "         gema --help   (オプション一覧)"
+echo "         gema /auth    (起動後に接続先を確認)"

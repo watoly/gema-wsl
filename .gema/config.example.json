@@ -2,8 +2,10 @@
   "_comment": "このファイルを .gema/config.json にコピーすると、このプロジェクトでの既定設定になります。ユーザー共通設定は ~/.config/gema/config.json です。",
 
   "model": "gemini-3.7-flash",
-  "auth": "apikey",
+  "_auth": "vertex = Vertex AI + gcloud ADC (既定) / apikey = Google AI Studio の API キー",
+  "auth": "vertex",
 
+  "_project": "空なら gcloud config get-value project を自動で使います",
   "project": "",
   "location": "global",
 

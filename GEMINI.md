@@ -19,6 +19,9 @@ node dist/index.js --help
   Node 22 の標準機能で足りないか確認すること。
 - **API は `client.models.generateContentStream` を使う。** `client.interactions` (NextGen API) は
   Gemini API 専用で Vertex AI では使えないため、両対応を保つ限り採用しない。
+- **既定の認証は Vertex AI + ADC。** 参考元の gem-agent と揃えてある。API キー (`apikey`) は
+  GCP なしで試すための副モード。認証方式を明示していないときだけ、材料が揃っている方へ自動で倒す
+  (`loadConfig` の `explicitAuth` 判定)。この自動フォールバックを明示指定にまで及ぼさないこと。
 - **モデルの返した Part はそのまま履歴に積む。** `thoughtSignature` は Gemini 3 系の function calling で
   必須なので、`Agent.mergePart` はテキスト以外の Part や署名付き Part を結合しない。
 - **ツールのエラーは throw ではなく `ToolError`。** `Agent.runTool` がこれを捕まえて
@@ -34,7 +37,7 @@ node dist/index.js --help
 | `src/index.ts` | CLI 引数、ワークスペース root の決定、非対話モード |
 | `src/repl.ts` | 対話ループ、スラッシュコマンド、承認 UI、Tab 補完 |
 | `src/agent.ts` | エージェントループ。ストリーム畳み込みとツール往復 |
-| `src/config.ts` | 設定の階層マージ (CLI > env > プロジェクト > ユーザー > 既定) |
+| `src/config.ts` | 設定の階層マージ (CLI > env > プロジェクト > ユーザー > 既定)、認証方式の決定、gcloud 既定プロジェクトの検出 |
 | `src/tools/` | ツール実装。`index.ts` の `TOOLS` に登録すると自動でモデルに公開される |
 
 ## ツールを追加するとき
@@ -50,8 +53,13 @@ API キーなしで確認できる範囲:
 
 ```bash
 node dist/index.js --help
-printf '/tools\n/config\n/exit\n' | GEMINI_API_KEY=dummy node dist/index.js --no-session
+printf '/tools\n/config\n/auth\n/exit\n' \
+  | GEMINI_API_KEY=dummy node dist/index.js --auth apikey --no-session
 ```
+
+認証方式の解決ロジックを変えたときは、最低限この 5 通りを確認すること:
+何も設定なし / `GEMINI_API_KEY` のみ / `--auth vertex` 明示 + キーあり / `--project` 指定 /
+`--auth apikey` + キーなし。
 
 ツール単体やエージェントループは `client.models.generateContentStream` をモックすれば
 API キーなしで検証できる (会話ログの `scratchpad/agenttest.mjs` が参考になる)。
