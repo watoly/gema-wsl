@@ -1,0 +1,24 @@
+{
+  "_comment": "このファイルを .gema/config.json にコピーすると、このプロジェクトでの既定設定になります。ユーザー共通設定は ~/.config/gema/config.json です。",
+
+  "model": "gemini-3.7-flash",
+  "auth": "apikey",
+
+  "project": "",
+  "location": "global",
+
+  "temperature": 0.7,
+  "thinkingLevel": "MEDIUM",
+  "showThoughts": false,
+
+  "autoApprove": false,
+  "allowCommands": ["ls", "cat", "head", "tail", "wc", "pwd", "echo", "which", "grep", "rg", "find", "git", "npm", "node", "pnpm", "make"],
+  "denyCommands": ["shutdown", "reboot", "poweroff", "mkfs", "dd", "sudo"],
+
+  "maxIterations": 25,
+  "shellTimeoutMs": 120000,
+  "maxFileBytes": 524288,
+  "allowOutsideWorkspace": false,
+
+  "contextFileNames": ["GEMINI.md", "AGENTS.md", "CLAUDE.md", ".gema/instructions.md"]
+}

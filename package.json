@@ -1,0 +1,27 @@
+{
+  "name": "gema",
+  "version": "0.1.0",
+  "description": "Gemini-powered coding agent CLI for WSL/Ubuntu",
+  "type": "module",
+  "bin": {
+    "gema": "dist/index.js"
+  },
+  "main": "dist/index.js",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json && chmod +x dist/index.js",
+    "dev": "npm run build && node dist/index.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@google/genai": "^2.19.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.0"
+  },
+  "license": "MIT"
+}
