@@ -49,8 +49,8 @@ sudo apt-get update && sudo apt-get install -y google-cloud-cli
 ## インストール
 
 ```bash
-git clone <このリポジトリ> ~/gemini-agent
-cd ~/gemini-agent
+git clone https://github.com/watoly/gema-wsl.git ~/gema-wsl
+cd ~/gema-wsl
 ./install.sh
 ```
 

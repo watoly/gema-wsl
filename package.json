@@ -23,5 +23,18 @@
     "@types/node": "^22.10.0",
     "typescript": "^5.7.0"
   },
-  "license": "MIT"
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/watoly/gema-wsl.git"
+  },
+  "author": "watoly",
+  "keywords": [
+    "gemini",
+    "cli",
+    "agent",
+    "wsl",
+    "coding-agent",
+    "vertex-ai"
+  ]
 }
