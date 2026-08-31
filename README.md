@@ -233,11 +233,21 @@ export HTTPS_PROXY=http://proxy.example.com:8080
 **`/mnt/c/...` の作業が極端に遅い** — Windows 側ファイルシステムへの I/O は遅いです。
 リポジトリは WSL 側 (`~/` 配下) に置いてください。
 
+**`install.sh` で「Node.js が見つかりません」と出る** — `install.sh` は `~/.bashrc` を読まないため、
+nvm / fnm で入れた Node は PATH に無いことがあります。スクリプト側で `nvm.sh` を自動で読み込むように
+してありますが、それでも見つからない場合はメッセージに出る PATH と探索先を確認してください。
+
+- `sudo ./install.sh` は使わないでください。sudo は PATH を差し替えるため nvm の Node が見えなくなります
+  (スクリプトが検知して止めます)。
+- nvm を使っているなら、新しいシェルを開くか `source ~/.nvm/nvm.sh && nvm use 22` の後に再実行してください。
+
 **`gema: command not found`** — `npm link` の prefix が PATH に入っていません。
 
 ```bash
 npm config get prefix         # 出たパスの bin が PATH にあるか確認
 ```
+
+nvm を使っている場合は、`npm link` 後に新しいシェルを開けば有効になります。
 
 **`Could not load the default credentials`** — ADC が未設定か期限切れです。
 

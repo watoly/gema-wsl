@@ -4,17 +4,92 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
-if ! command -v node >/dev/null 2>&1; then
-  echo "Node.js が見つかりません。以下でインストールしてください:" >&2
-  echo "  curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash - && sudo apt-get install -y nodejs" >&2
+REQUIRED_MAJOR=22
+
+warn() { printf '%s\n' "$*" >&2; }
+
+# ── sudo 実行を止める ──────────────────────────────────────────
+# sudo は PATH を secure_path に差し替えるため nvm/fnm の node が見えなくなり、
+# 通っても npm link が root 所有でインストールされてしまう。
+if [ "$(id -u)" -eq 0 ] && [ -n "${SUDO_USER:-}" ]; then
+  warn "sudo を付けずに実行してください:  ./install.sh"
+  warn ""
+  warn "sudo は PATH を差し替えるため nvm 等で入れた Node.js が見えなくなり、"
+  warn "インストールも root 所有になってしまいます。"
   exit 1
 fi
 
-NODE_MAJOR="$(node -p 'process.versions.node.split(".")[0]')"
-if [ "$NODE_MAJOR" -lt 22 ]; then
-  echo "Node.js 22 以上が必要です (現在: $(node -v))" >&2
+# ── Node.js のバージョンマネージャを読み込む ───────────────────
+# ./install.sh は ~/.bashrc を読まないため、nvm/fnm の node は PATH に無いことがある。
+if ! command -v node >/dev/null 2>&1 && ! command -v nodejs >/dev/null 2>&1; then
+  NVM_SH="${NVM_DIR:-$HOME/.nvm}/nvm.sh"
+  if [ -s "$NVM_SH" ]; then
+    echo "==> PATH に node が無いため nvm を読み込みます (${NVM_SH})"
+    # nvm.sh は set -eu 下で落ちることがあるので一時的に解除する
+    set +eu
+    # shellcheck disable=SC1090
+    . "$NVM_SH" >/dev/null 2>&1
+    nvm use --silent default >/dev/null 2>&1 || nvm use --silent node >/dev/null 2>&1
+    set -eu
+  fi
+fi
+
+if ! command -v node >/dev/null 2>&1 && command -v fnm >/dev/null 2>&1; then
+  echo "==> fnm の環境を読み込みます"
+  set +eu
+  eval "$(fnm env 2>/dev/null)"
+  set -eu
+fi
+
+# ── node を特定する (Debian 系は nodejs という名前のことがある) ──
+NODE_BIN=""
+for candidate in node nodejs; do
+  if command -v "$candidate" >/dev/null 2>&1; then
+    NODE_BIN="$candidate"
+    break
+  fi
+done
+
+if [ -z "$NODE_BIN" ]; then
+  warn "Node.js が見つかりません。"
+  warn ""
+  warn "  探した場所:"
+  warn "    - PATH 上の node / nodejs"
+  warn "    - ${NVM_DIR:-$HOME/.nvm}/nvm.sh (nvm)"
+  warn "    - fnm"
+  warn "  現在の PATH: $PATH"
+  warn ""
+  warn "すでに nvm で Node.js を入れている場合は、新しいシェルを開くか次を実行してから再試行してください:"
+  warn "    source \"\${NVM_DIR:-\$HOME/.nvm}/nvm.sh\" && nvm use $REQUIRED_MAJOR"
+  warn ""
+  warn "未インストールの場合は、どちらかの方法で入れてください:"
+  warn "  A) nvm (sudo 不要・バージョン切替が楽)   https://github.com/nvm-sh/nvm"
+  warn "       nvm install $REQUIRED_MAJOR"
+  warn "  B) NodeSource (システム全体に導入)"
+  warn "       curl -fsSL https://deb.nodesource.com/setup_${REQUIRED_MAJOR}.x | sudo -E bash -"
+  warn "       sudo apt-get install -y nodejs"
   exit 1
 fi
+
+NODE_VERSION="$("$NODE_BIN" -p 'process.versions.node')"
+NODE_MAJOR="${NODE_VERSION%%.*}"
+if [ "$NODE_MAJOR" -lt "$REQUIRED_MAJOR" ]; then
+  warn "Node.js $REQUIRED_MAJOR 以上が必要です (現在: v${NODE_VERSION} — $(command -v "$NODE_BIN"))"
+  warn ""
+  warn "nvm を使っているなら:  nvm install $REQUIRED_MAJOR && nvm alias default $REQUIRED_MAJOR"
+  exit 1
+fi
+
+if ! command -v npm >/dev/null 2>&1; then
+  warn "npm が見つかりません (node: $(command -v "$NODE_BIN"))"
+  warn "Debian/Ubuntu のパッケージで node だけ入れた場合は npm も入れてください:"
+  warn "    sudo apt-get install -y npm"
+  exit 1
+fi
+
+echo "==> node $(command -v "$NODE_BIN") (v${NODE_VERSION})"
+echo "==> npm  $(command -v npm) (v$(npm -v))"
+echo
 
 echo "==> 依存パッケージをインストール"
 npm install
@@ -24,10 +99,17 @@ npm run build
 
 echo "==> gema コマンドを PATH に登録 (npm link)"
 if ! npm link 2>/dev/null; then
-  echo "npm link に失敗しました。sudo なしで使える prefix を設定してから再実行してください:" >&2
-  echo "  npm config set prefix ~/.local" >&2
-  echo '  export PATH="$HOME/.local/bin:$PATH"   # ~/.bashrc に追記' >&2
+  warn "npm link に失敗しました。sudo なしで使える prefix を設定してから再実行してください:"
+  warn "  npm config set prefix ~/.local"
+  warn '  export PATH="$HOME/.local/bin:$PATH"   # ~/.bashrc に追記'
   exit 1
+fi
+
+if ! command -v gema >/dev/null 2>&1; then
+  warn ""
+  warn "npm link は成功しましたが gema が PATH 上に見つかりません。"
+  warn "  npm config get prefix   # ここで表示されるパスの bin を PATH に追加してください"
+  warn "nvm を使っている場合は、新しいシェルを開けば有効になります。"
 fi
 
 echo
