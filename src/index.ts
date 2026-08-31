@@ -5,15 +5,25 @@ import { isAbsolute, resolve } from 'node:path';
 import { Agent } from './agent.js';
 import { ApprovalGate } from './approval.js';
 import { createClient, explainApiError } from './client.js';
-import { loadConfig, describeAuth, validateConfig, type AuthMode, type GemaConfig, type ThinkLevel } from './config.js';
+import {
+  loadConfig,
+  describeAuth,
+  validateConfig,
+  type AuthMode,
+  type GemaConfig,
+  type SandboxMode,
+  type ThinkLevel,
+} from './config.js';
+import { McpManager } from './mcp.js';
 import { expandMentions } from './mentions.js';
 import { Repl } from './repl.js';
+import { describeSandbox, sandboxUsable } from './sandbox.js';
 import { SessionLog, listSessions, readSessionFile } from './session.js';
 import type { ApprovalDecision, ApprovalRequest } from './tools/types.js';
 import { expandHome } from './tools/util.js';
 import { StreamingMarkdown, c, errLine, label, line, out } from './ui.js';
 
-const VERSION = '0.1.0';
+const VERSION = '0.2.0';
 
 const HELP = `
 ${c.bold('gema')} — WSL / Ubuntu 向け Gemini コーディングエージェント  v${VERSION}
@@ -33,6 +43,13 @@ ${c.bold('オプション')}
       --show-thoughts         モデルの思考を表示する
   -C, --cwd <dir>             作業ディレクトリを指定して起動
       --yolo                  承認ゲートを無効化 (すべて自動承認)
+      --sandbox [mode]        run_command を bubblewrap で隔離
+                              mode: workspace-write (既定) / read-only
+      --no-sandbox            サンドボックスを無効化
+      --no-network            サンドボックス内からネットワークに出さない
+      --no-web-search         組み込みの Google 検索を使わない
+      --no-compact            コンテキストの自動圧縮を無効化
+      --no-mcp                MCP サーバーに接続しない
       --continue              直近のセッションを復元して起動
       --resume <n>            n 番目のセッションを復元 (--sessions で確認)
       --sessions              保存済みセッション一覧を表示して終了
@@ -60,10 +77,11 @@ interface Cli {
   resumeIndex?: number;
   listSessions: boolean;
   noSession: boolean;
+  noMcp: boolean;
 }
 
 function parseArgs(argv: string[]): Cli {
-  const cli: Cli = { overrides: {}, print: false, listSessions: false, noSession: false };
+  const cli: Cli = { overrides: {}, print: false, listSessions: false, noSession: false, noMcp: false };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]!;
     const next = (): string => {
@@ -124,6 +142,30 @@ function parseArgs(argv: string[]): Cli {
         break;
       case '--yolo':
         cli.overrides.autoApprove = true;
+        break;
+      case '--sandbox': {
+        const peek = argv[i + 1];
+        if (peek === 'workspace-write' || peek === 'read-only') {
+          cli.overrides.sandbox = argv[++i] as SandboxMode;
+        } else {
+          cli.overrides.sandbox = 'workspace-write';
+        }
+        break;
+      }
+      case '--no-sandbox':
+        cli.overrides.sandbox = 'off';
+        break;
+      case '--no-network':
+        cli.overrides.sandboxNetwork = false;
+        break;
+      case '--no-web-search':
+        cli.overrides.webSearch = 'off';
+        break;
+      case '--no-compact':
+        cli.overrides.autoCompact = false;
+        break;
+      case '--no-mcp':
+        cli.noMcp = true;
         break;
       case '--continue':
         cli.resumeIndex = 0;
@@ -203,6 +245,18 @@ async function main(): Promise<void> {
   const client = createClient(config);
   const session = cli.noSession ? null : new SessionLog(cwd, config.model, describeAuth(config));
 
+  if (config.sandbox !== 'off' && !sandboxUsable()) {
+    errLine(label('warn', describeSandbox(config)));
+  }
+
+  const mcp = cli.noMcp ? null : new McpManager();
+  if (mcp) {
+    await mcp.connectAll(config, (text) => errLine(c.dim(`  ${text}`)));
+  }
+  const shutdownMcp = async () => {
+    await mcp?.close();
+  };
+
   // ApprovalGate は Repl に依存し、Repl は Agent に依存するため、遅延バインドで循環を解く
   const asker: { ask: (req: ApprovalRequest) => Promise<ApprovalDecision> } = {
     ask: async () => 'deny',
@@ -216,6 +270,7 @@ async function main(): Promise<void> {
     root,
     cwd,
     session,
+    mcp,
     log: (text) => line(c.dim(`    ${text}`)),
   });
 
@@ -238,13 +293,21 @@ async function main(): Promise<void> {
       errLine('プロンプトが空です。gema -p "<指示>" のように指定してください。');
       process.exit(2);
     }
-    await runOnce(agent, gate, oneShotPrompt, config);
+    try {
+      await runOnce(agent, gate, oneShotPrompt, config);
+    } finally {
+      await shutdownMcp();
+    }
     return;
   }
 
-  const repl = new Repl({ agent, gate, config, root, session });
+  const repl = new Repl({ agent, gate, config, root, session, mcp });
   asker.ask = (req) => repl.ask(req);
-  await repl.run();
+  try {
+    await repl.run();
+  } finally {
+    await shutdownMcp();
+  }
 }
 
 /** 非対話モード。承認ゲートは自動承認 (--yolo 相当) でなければ書き込み系を拒否する。 */
@@ -258,7 +321,8 @@ async function runOnce(agent: Agent, gate: ApprovalGate, prompt: string, config:
   const controller = new AbortController();
   process.on('SIGINT', () => controller.abort());
 
-  const { parts } = await expandMentions(prompt, agent.cwd);
+  const { parts, problems } = await expandMentions(prompt, agent.cwd, config.maxMediaBytes);
+  for (const problem of problems) errLine(label('warn', problem));
   const md = new StreamingMarkdown();
   let failed = false;
 
@@ -275,6 +339,12 @@ async function runOnce(agent: Agent, gate: ApprovalGate, prompt: string, config:
         break;
       case 'tool_denied':
         errLine(`  ⎿ 拒否 (--yolo で許可できます)`);
+        break;
+      case 'notice':
+        errLine(label('warn', event.message));
+        break;
+      case 'grounding':
+        errLine(c.dim(`  出典: ${event.sources.map((s2) => s2.uri).join(', ')}`));
         break;
       case 'error':
         out(md.flush());

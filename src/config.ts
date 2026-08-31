@@ -5,6 +5,24 @@ import { join } from 'node:path';
 
 export type AuthMode = 'apikey' | 'vertex';
 export type ThinkLevel = 'MINIMAL' | 'LOW' | 'MEDIUM' | 'HIGH';
+export type WebSearchMode = 'auto' | 'on' | 'off';
+export type SandboxMode = 'off' | 'workspace-write' | 'read-only';
+
+/** MCP サーバー 1 台分の設定。command 指定なら stdio、url 指定ならリモート HTTP。 */
+export interface McpServerConfig {
+  /** stdio サーバーの実行ファイル */
+  command?: string;
+  args?: string[];
+  env?: Record<string, string>;
+  cwd?: string;
+  /** リモート Streamable HTTP サーバーの URL */
+  url?: string;
+  headers?: Record<string, string>;
+  /** 接続をスキップする */
+  disabled?: boolean;
+  /** 起動タイムアウト (ミリ秒) */
+  timeoutMs?: number;
+}
 
 export interface GemaConfig {
   /**
@@ -36,6 +54,43 @@ export interface GemaConfig {
   /** ワークスペース外のパスへのアクセスを許可するか */
   allowOutsideWorkspace: boolean;
   systemPromptExtra?: string;
+
+  // ── Web ──────────────────────────────────────────────────────
+  /**
+   * 組み込みの Google 検索ツールを使うか。
+   * auto = 有効にし、モデル/バックエンドが拒否したらそのセッションでは自動的に無効化する
+   */
+  webSearch: WebSearchMode;
+  /** web_fetch が 1 ページから取り込む最大文字数 */
+  webFetchMaxChars: number;
+  /** web_fetch を承認なしで許可するホスト名 */
+  allowedWebHosts: string[];
+
+  // ── マルチモーダル ────────────────────────────────────────────
+  /** 画像・PDF などをインライン添付する上限バイト数 */
+  maxMediaBytes: number;
+
+  // ── コンテキスト自動圧縮 ──────────────────────────────────────
+  autoCompact: boolean;
+  /** 直近リクエストの入力トークンがこれを超えたら圧縮する */
+  compactAtTokens: number;
+  /** 圧縮時に要約せずそのまま残す末尾のユーザーターン数 */
+  compactKeepTurns: number;
+
+  // ── サンドボックス ────────────────────────────────────────────
+  /**
+   * run_command の隔離方法 (bubblewrap を使用)。
+   * workspace-write = ワークスペースと /tmp 以外は読み取り専用
+   * read-only       = /tmp 以外すべて読み取り専用
+   */
+  sandbox: SandboxMode;
+  /** サンドボックス内からネットワークに出られるか */
+  sandboxNetwork: boolean;
+  /** サンドボックス内で追加で書き込みを許すパス */
+  sandboxWritablePaths: string[];
+
+  // ── MCP ──────────────────────────────────────────────────────
+  mcpServers: Record<string, McpServerConfig>;
 }
 
 export const DEFAULT_MODEL = 'gemini-3.7-flash';
@@ -73,6 +128,22 @@ const DEFAULTS: GemaConfig = {
   maxFileBytes: 512 * 1024,
   contextFileNames: ['GEMINI.md', 'AGENTS.md', 'CLAUDE.md', '.gema/instructions.md'],
   allowOutsideWorkspace: false,
+
+  webSearch: 'auto',
+  webFetchMaxChars: 40_000,
+  allowedWebHosts: [],
+
+  maxMediaBytes: 15 * 1024 * 1024,
+
+  autoCompact: true,
+  compactAtTokens: 150_000,
+  compactKeepTurns: 2,
+
+  sandbox: 'off',
+  sandboxNetwork: true,
+  sandboxWritablePaths: ['~/.npm', '~/.cache', '~/.config/gcloud'],
+
+  mcpServers: {},
 };
 
 export function userConfigDir(): string {

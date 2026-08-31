@@ -1,6 +1,6 @@
 {
   "name": "gema",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Gemini-powered coding agent CLI for WSL/Ubuntu",
   "type": "module",
   "bin": {
@@ -17,7 +17,8 @@
     "start": "node dist/index.js"
   },
   "dependencies": {
-    "@google/genai": "^2.19.0"
+    "@google/genai": "^2.19.0",
+    "@modelcontextprotocol/sdk": "^1.30.0"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

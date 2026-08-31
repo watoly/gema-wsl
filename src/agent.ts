@@ -1,11 +1,22 @@
-import type { Content, FunctionCall, GenerateContentResponse, GoogleGenAI, Part, ThinkingLevel } from '@google/genai';
+import type {
+  Content,
+  FunctionCall,
+  GenerateContentResponse,
+  GoogleGenAI,
+  GroundingMetadata,
+  Part,
+  Tool,
+  ThinkingLevel,
+} from '@google/genai';
 import type { ApprovalGate } from './approval.js';
 import { explainApiError } from './client.js';
+import { compactHistory } from './compact.js';
 import type { GemaConfig } from './config.js';
+import type { McpManager } from './mcp.js';
 import { buildSystemInstruction } from './prompt.js';
 import type { SessionLog } from './session.js';
-import { getTool, toolDeclarations } from './tools/index.js';
-import { ToolError, type ToolContext, type ToolResult } from './tools/types.js';
+import { TOOLS } from './tools/index.js';
+import { ToolError, type ToolContext, type ToolDef, type ToolResult } from './tools/types.js';
 
 export type AgentEvent =
   | { type: 'text'; delta: string }
@@ -13,6 +24,9 @@ export type AgentEvent =
   | { type: 'tool_call'; name: string; args: Record<string, unknown> }
   | { type: 'tool_result'; name: string; summary: string; isError: boolean; output: string }
   | { type: 'tool_denied'; name: string; reason: string }
+  | { type: 'grounding'; sources: { title: string; uri: string }[] }
+  | { type: 'notice'; message: string }
+  | { type: 'compacted'; removed: number; summaryChars: number }
   | { type: 'turn_end'; usage: Usage }
   | { type: 'aborted' }
   | { type: 'error'; message: string };
@@ -32,19 +46,31 @@ export interface AgentDeps {
   root: string;
   cwd: string;
   session: SessionLog | null;
-  /** ツール実行中の進捗表示 */
+  mcp: McpManager | null;
   log: (text: string) => void;
 }
 
 const INTERRUPT_NOTE = '[ユーザーによって処理が中断されました。次の指示を待ってください。]';
 
+/** 組み込みツールとカスタム関数の併用が拒否されたことを示すエラーか */
+function isToolCombinationError(message: string): boolean {
+  return /tool.{0,40}(combination|unsupported|not supported)|unsupported.{0,40}tool|google_?search.{0,40}(unsupported|not supported)|INVALID_ARGUMENT.*tool/i.test(
+    message,
+  );
+}
+
 export class Agent {
   history: Content[] = [];
   usage: Usage = { prompt: 0, output: 0, thoughts: 0, total: 0, requests: 0 };
   private systemInstruction: string;
+  /** 直近リクエストの入力トークン数 (自動圧縮の判定に使う) */
+  private lastPromptTokens = 0;
+  /** 組み込み Google 検索を、このセッションで使えるか */
+  private builtinSearchEnabled: boolean;
 
   constructor(private deps: AgentDeps) {
     this.systemInstruction = buildSystemInstruction(deps.root, deps.cwd, deps.config);
+    this.builtinSearchEnabled = deps.config.webSearch !== 'off';
   }
 
   get config(): GemaConfig {
@@ -53,6 +79,14 @@ export class Agent {
 
   get cwd(): string {
     return this.deps.cwd;
+  }
+
+  get searchEnabled(): boolean {
+    return this.builtinSearchEnabled;
+  }
+
+  setSearchEnabled(value: boolean): void {
+    this.builtinSearchEnabled = value;
   }
 
   setCwd(cwd: string): void {
@@ -66,11 +100,27 @@ export class Agent {
 
   reset(): void {
     this.history = [];
+    this.lastPromptTokens = 0;
     this.refreshSystemInstruction();
   }
 
   loadHistory(contents: Content[]): void {
     this.history = contents;
+  }
+
+  /** 組み込みツール + MCP ツールを合わせた一覧 */
+  get tools(): ToolDef[] {
+    return [...TOOLS, ...(this.deps.mcp?.toolDefs ?? [])];
+  }
+
+  private findTool(name: string): ToolDef | undefined {
+    return this.tools.find((t) => t.name === name);
+  }
+
+  private buildToolList(): Tool[] {
+    const tools: Tool[] = [{ functionDeclarations: this.tools.map((t) => t.declaration) }];
+    if (this.builtinSearchEnabled) tools.unshift({ googleSearch: {} });
+    return tools;
   }
 
   private push(content: Content): void {
@@ -89,44 +139,44 @@ export class Agent {
         return;
       }
 
-      let stream: AsyncGenerator<GenerateContentResponse>;
-      try {
-        stream = await this.deps.client.models.generateContentStream({
-          model: this.config.model,
-          contents: this.history,
-          config: {
-            systemInstruction: this.systemInstruction,
-            tools: [{ functionDeclarations: toolDeclarations() }],
-            abortSignal: signal,
-            ...(this.config.temperature !== undefined ? { temperature: this.config.temperature } : {}),
-            ...(this.config.maxOutputTokens !== undefined ? { maxOutputTokens: this.config.maxOutputTokens } : {}),
-            ...(this.config.thinkingLevel
-              ? {
-                  thinkingConfig: {
-                    thinkingLevel: this.config.thinkingLevel as ThinkingLevel,
-                    includeThoughts: this.config.showThoughts,
-                  },
-                }
-              : this.config.showThoughts
-                ? { thinkingConfig: { includeThoughts: true } }
-                : {}),
-          },
-        });
-      } catch (err) {
-        yield { type: 'error', message: explainApiError(this.config, err) };
-        return;
+      let stream: AsyncGenerator<GenerateContentResponse> | null = null;
+      for (let attempt = 0; attempt < 2 && stream === null; attempt++) {
+        try {
+          stream = await this.deps.client.models.generateContentStream({
+            model: this.config.model,
+            contents: this.history,
+            config: this.requestConfig(signal),
+          });
+        } catch (err) {
+          const raw = err instanceof Error ? err.message : String(err);
+          if (this.builtinSearchEnabled && this.config.webSearch === 'auto' && isToolCombinationError(raw)) {
+            this.builtinSearchEnabled = false;
+            yield {
+              type: 'notice',
+              message:
+                '組み込みの Google 検索がこのモデル/バックエンドでは関数呼び出しと併用できないため、' +
+                'このセッションでは無効にしました (web_fetch は引き続き使えます)。',
+            };
+            continue; // 検索なしで一度だけやり直す
+          }
+          yield { type: 'error', message: explainApiError(this.config, err) };
+          return;
+        }
       }
+      if (stream === null) return;
 
       const modelParts: Part[] = [];
       let sawStreamError: string | null = null;
       let lastUsage: GenerateContentResponse['usageMetadata'];
+      let grounding: GroundingMetadata | undefined;
 
       try {
         for await (const chunk of stream) {
           if (signal.aborted) break;
           if (chunk.usageMetadata) lastUsage = chunk.usageMetadata;
-          const chunkParts = chunk.candidates?.[0]?.content?.parts ?? [];
-          for (const part of chunkParts) {
+          const candidate = chunk.candidates?.[0];
+          if (candidate?.groundingMetadata) grounding = candidate.groundingMetadata;
+          for (const part of candidate?.content?.parts ?? []) {
             this.mergePart(modelParts, part);
             if (part.text) {
               yield part.thought ? { type: 'thought', delta: part.text } : { type: 'text', delta: part.text };
@@ -134,15 +184,14 @@ export class Agent {
           }
         }
       } catch (err) {
-        if (signal.aborted) {
-          // 中断による例外は握りつぶす
-        } else {
-          sawStreamError = explainApiError(this.config, err);
-        }
+        if (!signal.aborted) sawStreamError = explainApiError(this.config, err);
       }
 
       this.accountUsage(lastUsage);
       if (modelParts.length > 0) this.push({ role: 'model', parts: modelParts });
+
+      const sources = extractSources(grounding);
+      if (sources.length > 0) yield { type: 'grounding', sources };
 
       if (signal.aborted) {
         yield { type: 'aborted' };
@@ -164,6 +213,8 @@ export class Agent {
       }
 
       const responseParts: Part[] = [];
+      const mediaParts: Part[] = [];
+
       for (const call of calls) {
         if (signal.aborted) break;
         const name = call.name!;
@@ -187,6 +238,7 @@ export class Agent {
         responseParts.push(
           this.toResponsePart(call, result.isError ? { error: result.output } : { output: result.output }),
         );
+        if (result.mediaParts?.length) mediaParts.push(...result.mediaParts);
       }
 
       if (signal.aborted) {
@@ -195,12 +247,57 @@ export class Agent {
         return;
       }
       this.push({ role: 'user', parts: responseParts });
+      // 画像や PDF は functionResponse に入れずに、続く user Content として渡す
+      if (mediaParts.length > 0) this.push({ role: 'user', parts: mediaParts });
     }
 
     yield {
       type: 'error',
       message: `ツール実行が ${this.config.maxIterations} 往復に達したため打ち切りました。指示を分割するか、maxIterations を増やしてください。`,
     };
+  }
+
+  private requestConfig(signal: AbortSignal) {
+    const config = this.config;
+    return {
+      systemInstruction: this.systemInstruction,
+      tools: this.buildToolList(),
+      abortSignal: signal,
+      ...(config.temperature !== undefined ? { temperature: config.temperature } : {}),
+      ...(config.maxOutputTokens !== undefined ? { maxOutputTokens: config.maxOutputTokens } : {}),
+      ...(config.thinkingLevel
+        ? {
+            thinkingConfig: {
+              thinkingLevel: config.thinkingLevel as ThinkingLevel,
+              includeThoughts: config.showThoughts,
+            },
+          }
+        : config.showThoughts
+          ? { thinkingConfig: { includeThoughts: true } }
+          : {}),
+    };
+  }
+
+  /** 自動圧縮が必要なら実行する。呼び出し側はターン終了後に呼ぶ。 */
+  async maybeCompact(signal?: AbortSignal): Promise<{ removed: number; summaryChars: number } | null> {
+    if (!this.config.autoCompact) return null;
+    if (this.lastPromptTokens < this.config.compactAtTokens) return null;
+    return this.compact(signal);
+  }
+
+  /** 履歴を要約で置き換える (/compact からも呼ぶ) */
+  async compact(signal?: AbortSignal): Promise<{ removed: number; summaryChars: number } | null> {
+    const outcome = await compactHistory(this.deps.client, this.config, this.history, signal);
+    if (!outcome) return null;
+    this.history = outcome.history;
+    this.lastPromptTokens = 0;
+    this.deps.session?.appendNote(`[compact] ${outcome.removed} メッセージを要約に置き換えました`);
+    for (const content of outcome.history.slice(0, 2)) this.deps.session?.appendContent(content);
+    return { removed: outcome.removed, summaryChars: outcome.summary.length };
+  }
+
+  get promptTokens(): number {
+    return this.lastPromptTokens;
   }
 
   private toResponsePart(call: FunctionCall, response: Record<string, unknown>): Part {
@@ -218,7 +315,7 @@ export class Agent {
     args: Record<string, unknown>,
     signal: AbortSignal,
   ): Promise<{ kind: 'ok'; result: ToolResult } | { kind: 'denied'; reason: string }> {
-    const tool = getTool(name);
+    const tool = this.findTool(name);
     if (!tool) {
       return { kind: 'ok', result: { output: `未知のツールです: ${name}`, isError: true } };
     }
@@ -283,5 +380,16 @@ export class Agent {
     this.usage.output += u.candidatesTokenCount ?? 0;
     this.usage.thoughts += u.thoughtsTokenCount ?? 0;
     this.usage.total += u.totalTokenCount ?? 0;
+    this.lastPromptTokens = u.promptTokenCount ?? this.lastPromptTokens;
   }
+}
+
+function extractSources(grounding: GroundingMetadata | undefined): { title: string; uri: string }[] {
+  const chunks = grounding?.groundingChunks ?? [];
+  const sources: { title: string; uri: string }[] = [];
+  for (const chunk of chunks) {
+    const web = chunk.web;
+    if (web?.uri) sources.push({ title: web.title ?? web.uri, uri: web.uri });
+  }
+  return sources.slice(0, 8);
 }

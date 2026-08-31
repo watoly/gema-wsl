@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
 import { Type } from '@google/genai';
+import { buildSpawnSpec, sandboxUsable } from '../sandbox.js';
 import { ToolError, type ToolDef } from './types.js';
 import { pathKind, relPath, resolvePath } from './util.js';
 
@@ -65,11 +66,13 @@ export const runCommandTool: ToolDef = {
       !hasUnsafeShellSyntax(command);
     if (allAllowed) return null;
 
+    const sandboxNote =
+      ctx.config.sandbox !== 'off' && sandboxUsable() ? `\n[sandbox: ${ctx.config.sandbox}]` : '';
     return {
       tool: 'run_command',
       key: `run_command:${[...new Set(bases)].sort().join(',')}`,
       title: `コマンドを実行する: ${String(args['description'] ?? '')}`.trim(),
-      detail: command,
+      detail: command + sandboxNote,
     };
   },
   async run(args, ctx) {
@@ -92,8 +95,11 @@ export const runCommandTool: ToolDef = {
 
     const timeoutMs = Math.max(1000, Number(args['timeout_ms'] ?? ctx.config.shellTimeoutMs) || ctx.config.shellTimeoutMs);
 
+    const sandboxed = ctx.config.sandbox !== 'off' && sandboxUsable();
+    const spec = buildSpawnSpec(command, cwd, ctx.root, ctx.config);
+
     return await new Promise((resolvePromise, rejectPromise) => {
-      const child = spawn('bash', ['-c', command], {
+      const child = spawn(spec.file, spec.args, {
         cwd,
         env: { ...process.env, GEMA: '1' },
         stdio: ['ignore', 'pipe', 'pipe'],
@@ -145,7 +151,9 @@ export const runCommandTool: ToolDef = {
         const rel = relPath(ctx, cwd);
         resolvePromise({
           output: parts.join('\n') || '(出力なし)',
-          summary: `${command.split('\n')[0]!.slice(0, 70)} → exit ${code ?? signal ?? '?'}${rel === '.' ? '' : ` (${rel})`}`,
+          summary:
+            `${command.split('\n')[0]!.slice(0, 70)} → exit ${code ?? signal ?? '?'}` +
+            `${rel === '.' ? '' : ` (${rel})`}${sandboxed ? ' [sandbox]' : ''}`,
           isError: code !== 0,
         });
       };

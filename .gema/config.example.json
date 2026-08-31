@@ -13,6 +13,7 @@
   "thinkingLevel": "MEDIUM",
   "showThoughts": false,
 
+  "_approval": "autoApprove=true は承認ゲートを外します (--yolo と同じ)",
   "autoApprove": false,
   "allowCommands": ["ls", "cat", "head", "tail", "wc", "pwd", "echo", "which", "grep", "rg", "find", "git", "npm", "node", "pnpm", "make"],
   "denyCommands": ["shutdown", "reboot", "poweroff", "mkfs", "dd", "sudo"],
@@ -21,6 +22,38 @@
   "shellTimeoutMs": 120000,
   "maxFileBytes": 524288,
   "allowOutsideWorkspace": false,
+
+  "_web": "webSearch: auto = 組み込み Google 検索を使い、併用不可なら自動で無効化 / on / off",
+  "webSearch": "auto",
+  "webFetchMaxChars": 40000,
+  "allowedWebHosts": ["ai.google.dev", "developer.mozilla.org"],
+
+  "_media": "画像・PDF・音声・動画をインライン添付する上限バイト数",
+  "maxMediaBytes": 15728640,
+
+  "_compact": "入力トークンが compactAtTokens を超えたら、末尾 compactKeepTurns ターンを残して要約に置き換える",
+  "autoCompact": true,
+  "compactAtTokens": 150000,
+  "compactKeepTurns": 2,
+
+  "_sandbox": "run_command を bubblewrap で隔離する。off / workspace-write / read-only",
+  "sandbox": "off",
+  "sandboxNetwork": true,
+  "sandboxWritablePaths": ["~/.npm", "~/.cache", "~/.config/gcloud"],
+
+  "_mcp": "command 指定ならローカル stdio、url 指定ならリモート Streamable HTTP",
+  "mcpServers": {
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "~/projects"],
+      "disabled": true
+    },
+    "example-remote": {
+      "url": "https://mcp.example.com/mcp",
+      "headers": { "Authorization": "Bearer ${TOKEN}" },
+      "disabled": true
+    }
+  },
 
   "contextFileNames": ["GEMINI.md", "AGENTS.md", "CLAUDE.md", ".gema/instructions.md"]
 }

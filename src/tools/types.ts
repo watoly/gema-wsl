@@ -1,4 +1,4 @@
-import type { FunctionDeclaration } from '@google/genai';
+import type { FunctionDeclaration, Part } from '@google/genai';
 import type { GemaConfig } from '../config.js';
 
 export type Risk = 'read' | 'write' | 'exec';
@@ -30,6 +30,12 @@ export interface ToolResult {
   /** 画面表示用の 1 行サマリ */
   summary?: string;
   isError?: boolean;
+  /**
+   * 画像・PDF など、テキストで返せない結果。
+   * functionResponse とは別の user Content として履歴に積まれる
+   * (FunctionResponsePart のバックエンド差を避けるため)。
+   */
+  mediaParts?: Part[];
 }
 
 export interface ToolDef {

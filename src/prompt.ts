@@ -67,6 +67,10 @@ export function buildSystemInstruction(root: string, cwd: string, config: GemaCo
 - ファイルを編集する前に、必ず read_file で現在の内容を確認すること。
 - 既存ファイルの部分修正には edit_file を使い、write_file による全文上書きは新規作成時か全面書き換え時に限ること。
 - 探索は glob (ファイル名) と grep (中身) を使い分けること。広い探索を恐れず、まず現状を把握してから手を動かすこと。
+- 画像・PDF・音声・動画は read_file では読めない。view_media を使うこと。
+- 外部の情報が必要なときは web_fetch で URL を取得すること。Google 検索ツールが有効な場合は、
+  最新情報や仕様の確認にそれを使い、答えた根拠の URL を示すこと。
+- 推測でライブラリの API を書かないこと。手元の node_modules を読むか、公式ドキュメントを web_fetch で確認すること。
 - 変更を加えたら、可能ならテストやビルドを run_command で実行して結果を確認すること。
 - 破壊的な操作 (ファイル削除、git push、外部への送信など) は、ユーザーが明示的に指示した場合のみ行うこと。
 - ユーザーの依頼の範囲を勝手に広げないこと。頼まれていないリファクタリングや追加機能は提案に留めること。`,
@@ -85,7 +89,16 @@ export function buildSystemInstruction(root: string, cwd: string, config: GemaCo
 - ${gitInfo(root)}
 - 現在日時: ${new Date().toISOString()}
 - モデル: ${config.model}
-- Windows 側のファイルは /mnt/c/... からアクセスできますが、I/O が遅い点に注意してください。`,
+- Windows 側のファイルは /mnt/c/... からアクセスできますが、I/O が遅い点に注意してください。${
+      config.sandbox !== 'off'
+        ? `
+- run_command はサンドボックス (${config.sandbox}) 内で実行されます。${
+            config.sandbox === 'workspace-write'
+              ? 'ワークスペースと /tmp 以外は読み取り専用です。'
+              : '/tmp 以外は読み取り専用です。'
+          }${config.sandboxNetwork ? '' : 'ネットワークにも出られません。'}`
+        : ''
+    }`,
 
     `## ツール実行の承認について
 書き込み系・実行系のツールはユーザーの承認を経てから実行されます。

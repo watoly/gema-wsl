@@ -122,6 +122,9 @@ gema -C ~/work/myapp          # 作業ディレクトリを指定して起動
 gema --continue               # 直前のセッションを復元して起動
 gema --model gemini-3.1-pro-preview
 gema --auth apikey            # 一時的に API キーモードで起動
+gema --sandbox                # run_command を隔離して起動
+gema --sandbox read-only --no-network
+gema --no-web-search --no-mcp # 組み込み検索と MCP を切って起動
 ```
 
 入力中に `@src/foo.ts` と書くと、そのファイルの内容が自動で添付されます (Tab で補完できます)。
@@ -138,7 +141,11 @@ gema --auth apikey            # 一時的に API キーモードで起動
 | `/models` | モデル候補の一覧 |
 | `/auth` | 認証方式と接続先 |
 | `/config` | 現在の設定を全部表示 |
-| `/tools` | 利用可能なツール一覧 |
+| `/tools` | 利用可能なツール一覧 (MCP 含む) |
+| `/mcp` | MCP サーバーの接続状況 |
+| `/sandbox [mode]` | サンドボックスの表示・切替 |
+| `/search [on\|off]` | 組み込み Google 検索の切替 |
+| `/compact` | 会話履歴を要約して圧縮 |
 | `/context` | 読み込んだプロジェクト指示ファイル |
 | `/cwd [dir]` | カレントディレクトリの表示・変更 |
 | `/cost` | このセッションのトークン使用量 |
@@ -159,9 +166,13 @@ gema --auth apikey            # 一時的に API キーモードで起動
 | `list_dir` | read | ディレクトリ一覧 |
 | `glob` | read | ファイル名で検索 (`**/*.ts` など) |
 | `grep` | read | 中身を正規表現で検索 (ripgrep があれば使用) |
+| `view_media` | read | 画像・PDF・音声・動画をモデルに直接読ませる |
 | `edit_file` | write | 文字列置換による部分編集 |
 | `write_file` | write | 新規作成・全文上書き |
-| `run_command` | exec | bash でコマンド実行 |
+| `run_command` | exec | bash でコマンド実行 (サンドボックス可) |
+| `web_fetch` | exec | URL を取得して本文をテキスト化 |
+
+これに加えて、Gemini 組み込みの **Google 検索**（サーバー側実行）と、設定した **MCP サーバーのツール**が同じ一覧に並びます (`/tools` で確認)。
 
 **write / exec 系は実行前に必ず承認を求めます。**
 
@@ -180,6 +191,88 @@ gema --auth apikey            # 一時的に API キーモードで起動
 - ファイル操作はワークスペース (git リポジトリのルート、なければ起動ディレクトリ) の外に出られません。`allowOutsideWorkspace: true` で解除できます。
 
 非対話モード (`-p`) では承認プロンプトを出せないため、write / exec 系は既定で拒否されます。許可するなら `--yolo` を付けてください。
+
+## 画像・PDF・音声・動画
+
+`@` で添付するか、エージェント自身に `view_media` を使わせることで、テキスト以外のファイルを読ませられます。
+
+```
+❯ このエラー画面の原因は？ @screenshot.png
+  添付: screenshot.png [画像 248KB]
+
+❯ 仕様書の3章を実装して @docs/spec.pdf
+```
+
+対応形式は png / jpg / webp / gif / heic、pdf、mp3 / wav / aac / ogg / flac、mp4 / mov / webm など。
+既定の上限は 15MB（`maxMediaBytes`）で、どちらのバックエンドでも同じに動くよう常にインラインで送ります。
+
+## Web 検索と取得
+
+- **`web_fetch`** — 任意の URL を取得して HTML をテキスト化します。承認はホスト単位（`a` を選ぶとそのドメインは以後自動許可）。
+  よく使うドメインは `allowedWebHosts` に入れておけば承認なしになります。
+- **組み込み Google 検索** — Gemini のサーバー側検索です。使われた場合は回答のあとに出典 URL が並びます。
+
+組み込み検索とカスタム関数の併用は Gemini 3 系でのみ可能で、バックエンドによっては拒否されます。
+既定の `webSearch: "auto"` では、拒否されたことを検知するとその場で検索を外して自動的にやり直し、
+以降そのセッションでは無効のまま続けます（`web_fetch` は影響を受けません）。`/search on|off` で手動切替もできます。
+
+## コンテキストの自動圧縮
+
+会話が長くなると、直近リクエストの入力トークンが `compactAtTokens`（既定 15 万）を超えた時点で履歴を要約に置き換えます。
+
+- 要約は「目的 / やったこと / 判明している事実 / 次の一手」の構成で、ファイルパスやエラー文はそのまま残します
+- 末尾の `compactKeepTurns` ターン（既定 2）はそのまま保持します
+- 切り出しは必ず**本物のユーザー発言の直前**で行うので、ツール呼び出しと結果の対応が壊れません
+
+`/compact` で任意のタイミングで実行、`--no-compact` で自動圧縮を切れます。
+
+## サンドボックス
+
+`run_command` を [bubblewrap](https://github.com/containers/bubblewrap) で隔離できます。
+
+```bash
+sudo apt-get install -y bubblewrap    # 未導入なら
+gema --sandbox                        # = workspace-write
+```
+
+| モード | 書き込み可能 | 用途 |
+| --- | --- | --- |
+| `off` (既定) | 制限なし | 通常の開発 |
+| `workspace-write` | ワークスペース + `/tmp` + `sandboxWritablePaths` | 見慣れないコードを動かすとき |
+| `read-only` | `/tmp` + `sandboxWritablePaths` | 調査だけさせるとき |
+
+ファイルシステム全体は読み取り専用でマウントされるので、参照はできますが書き換えはできません。
+`--no-network` を付けるとサンドボックス内からネットワークにも出られなくなります。
+`npm install` などがキャッシュを書けるよう、`~/.npm` と `~/.cache` は既定で書き込み可にしてあります（`sandboxWritablePaths`）。
+
+`/sandbox` で現在の状態、`/sandbox read-only` のように切り替えられます。
+
+## MCP サーバー
+
+ローカルの stdio サーバーとリモートの Streamable HTTP サーバーの両方に対応しています。
+接続したサーバーのツールは `mcp__<サーバー名>__<ツール名>` という名前で、組み込みツールと同じように使われます。
+
+`.gema/config.json`（またはユーザー設定）に書きます。
+
+```json
+{
+  "mcpServers": {
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "~/projects"]
+    },
+    "remote": {
+      "url": "https://mcp.example.com/mcp",
+      "headers": { "Authorization": "Bearer xxx" }
+    }
+  }
+}
+```
+
+- MCP ツールは外部プロセス・外部サービスを呼ぶため、**既定で毎回承認を求めます**（`a` でサーバー+ツール単位の自動承認）
+- 起動に失敗したサーバーがあっても、他のサーバーと本体の動作には影響しません。原因は `/mcp` で確認できます
+  （stdio サーバーの標準エラー出力も表示されます）
+- 一時的に全部切るなら `--no-mcp`、個別に切るなら設定の `"disabled": true`
 
 ## 設定ファイル
 
@@ -289,19 +382,25 @@ src/
 ├── prompt.ts       システムプロンプトの組み立て
 ├── approval.ts     MITL 承認ゲート
 ├── session.ts      JSONL セッションログ
-├── mentions.ts     @file の展開
+├── mentions.ts     @file の展開 (テキスト / メディア)
+├── media.ts        画像・PDF などの inlineData 化
+├── mcp.ts          MCP クライアント、JSON Schema → Gemini Schema 変換
+├── compact.ts      会話履歴の要約圧縮
+├── sandbox.ts      bubblewrap によるコマンド隔離
 ├── ui.ts           色・スピナー・ストリーミング Markdown
-└── tools/          read_file / list_dir / glob / grep / edit_file / write_file / run_command
+└── tools/          read_file / list_dir / glob / grep / view_media
+                    edit_file / write_file / run_command / web_fetch
 ```
 
 ## 現在の対応範囲
 
-実装済み: 対話 REPL、ストリーミング応答、ファイル操作・検索・シェル実行ツール、承認ゲート、
-セッション保存と復元、スラッシュコマンド、Tab 補完、`@file` 添付、プロジェクト指示ファイル、
-Vertex AI (既定) と Gemini API キーの切り替え。
+対話 REPL、ストリーミング応答、ファイル操作・検索・シェル実行、承認ゲート、セッション保存と復元、
+スラッシュコマンド、Tab 補完、`@file` 添付、プロジェクト指示ファイル、Vertex AI (既定) と API キーの切り替え、
+Web 検索・取得、マルチモーダル入力 (画像 / PDF / 音声 / 動画)、MCP サーバー連携 (stdio + リモート HTTP)、
+コンテキストの自動圧縮、bubblewrap によるサンドボックス実行。
 
-未実装 (参考にした gem-agent にはあるもの): Web 検索・取得、画像や PDF などマルチモーダル入力、
-MCP サーバー連携、コンテキストの自動圧縮、サンドボックス実行。
+参考にした gem-agent との主な違いは、動作環境 (WSL/Linux 対応)、実装言語 (Go → TypeScript)、
+サンドボックスの方式 (Seatbelt → bubblewrap)、そして API キー認証にも対応している点です。
 
 ## ライセンス
 

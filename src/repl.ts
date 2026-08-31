@@ -7,8 +7,9 @@ import type { ApprovalGate } from './approval.js';
 import { KNOWN_MODELS, describeAuth, userDataDir, type GemaConfig } from './config.js';
 import { expandMentions } from './mentions.js';
 import { loadProjectContext } from './prompt.js';
+import type { McpManager } from './mcp.js';
+import { describeSandbox, sandboxUsable } from './sandbox.js';
 import { listSessions, readSessionFile, type SessionLog } from './session.js';
-import { TOOLS } from './tools/index.js';
 import { expandHome, isInside } from './tools/util.js';
 import type { ApprovalDecision, ApprovalRequest } from './tools/types.js';
 import { StreamingMarkdown, c, label, line, out, truncate } from './ui.js';
@@ -21,7 +22,11 @@ const COMMANDS: { name: string; args?: string; help: string }[] = [
   { name: '/models', help: '利用可能なモデル候補を表示' },
   { name: '/auth', help: '認証方式と接続先を表示' },
   { name: '/config', help: '現在の設定を表示' },
-  { name: '/tools', help: '利用可能なツール一覧' },
+  { name: '/tools', help: '利用可能なツール一覧 (MCP 含む)' },
+  { name: '/mcp', help: 'MCP サーバーの接続状況' },
+  { name: '/sandbox', args: '[mode]', help: 'サンドボックスの表示・切替 (off/workspace-write/read-only)' },
+  { name: '/search', args: '[on|off]', help: '組み込み Google 検索の表示・切替' },
+  { name: '/compact', help: '会話履歴を要約して圧縮' },
   { name: '/context', help: '読み込んだプロジェクト指示ファイルを表示' },
   { name: '/cwd', args: '[dir]', help: 'カレントディレクトリの表示・変更' },
   { name: '/cost', help: 'このセッションのトークン使用量' },
@@ -39,6 +44,7 @@ export interface ReplDeps {
   config: GemaConfig;
   root: string;
   session: SessionLog | null;
+  mcp: McpManager | null;
 }
 
 export class Repl {
@@ -140,8 +146,13 @@ export class Repl {
 
   /** 1 ターン分をエージェントに投げ、イベントを画面に描画する */
   async turn(input: string): Promise<void> {
-    const { parts, attached } = await expandMentions(input, this.deps.agent.cwd);
+    const { parts, attached, problems } = await expandMentions(
+      input,
+      this.deps.agent.cwd,
+      this.deps.config.maxMediaBytes,
+    );
     if (attached.length) line(c.dim(`  添付: ${attached.join(', ')}`));
+    for (const problem of problems) line(label('warn', problem));
 
     this.abort = new AbortController();
     this.rl.pause();
@@ -187,6 +198,23 @@ export class Repl {
             line();
             line(label('error', event.message));
             break;
+          case 'notice':
+            out(md.flush());
+            line();
+            line(label('warn', event.message));
+            break;
+          case 'grounding':
+            out(md.flush());
+            line();
+            line(c.dim('  出典:'));
+            for (const source of event.sources) {
+              line(c.dim(`    - ${source.title}`));
+              line(c.dim(`      ${source.uri}`));
+            }
+            break;
+          case 'compacted':
+            line(label('info', `会話履歴を圧縮しました (${event.removed} メッセージ → 要約 ${event.summaryChars} 文字)`));
+            break;
           case 'turn_end':
             out(md.flush());
             line();
@@ -197,6 +225,22 @@ export class Repl {
       out(md.flush());
       this.abort = null;
       this.rl.resume();
+    }
+
+    // ターンが終わってから、必要なら履歴を自動圧縮する
+    try {
+      const compacted = await this.deps.agent.maybeCompact();
+      if (compacted) {
+        line(
+          label(
+            'info',
+            `コンテキストが大きくなったため自動圧縮しました ` +
+              `(${compacted.removed} メッセージ → 要約 ${compacted.summaryChars} 文字)`,
+          ),
+        );
+      }
+    } catch (err) {
+      line(label('warn', `自動圧縮に失敗しました: ${err instanceof Error ? err.message : String(err)}`));
     }
   }
 
@@ -261,14 +305,87 @@ export class Repl {
         line();
         return false;
 
-      case '/tools':
+      case '/tools': {
         line();
-        for (const t of TOOLS) {
+        for (const t of agent.tools) {
           const risk = t.risk === 'read' ? c.green('read') : t.risk === 'write' ? c.yellow('write') : c.red('exec');
-          line(`  ${c.cyan(t.name.padEnd(14))} [${risk}] ${(t.declaration.description ?? '').split('。')[0]}。`);
+          const desc = (t.declaration.description ?? '').split('。')[0];
+          line(`  ${c.cyan(t.name.padEnd(26))} [${risk}] ${desc}。`);
+        }
+        if (agent.searchEnabled) {
+          line(`  ${c.cyan('google_search'.padEnd(26))} [${c.green('read')}] Gemini 組み込みの Google 検索 (サーバー側実行)。`);
         }
         line();
         return false;
+      }
+
+      case '/mcp': {
+        const statuses = this.deps.mcp?.status ?? [];
+        if (statuses.length === 0) {
+          line(c.dim('  MCP サーバーは設定されていません'));
+          line(c.dim('  .gema/config.json の mcpServers に追加してください'));
+          return false;
+        }
+        line();
+        for (const st of statuses) {
+          const mark = st.connected ? c.green('●') : c.red('○');
+          line(`  ${mark} ${c.cyan(st.name.padEnd(16))} ${st.transport.padEnd(6)} ${st.toolCount} ツール`);
+          if (st.error) line(`      ${c.red(st.error)}`);
+        }
+        line();
+        return false;
+      }
+
+      case '/sandbox': {
+        if (!arg) {
+          line(`  ${describeSandbox(config)}`);
+          if (config.sandbox !== 'off' && !sandboxUsable()) {
+            line(c.dim('  bubblewrap の導入:  sudo apt-get install -y bubblewrap'));
+          }
+          return false;
+        }
+        if (arg !== 'off' && arg !== 'workspace-write' && arg !== 'read-only') {
+          line(label('error', 'off / workspace-write / read-only のいずれかを指定してください'));
+          return false;
+        }
+        if (arg !== 'off' && !sandboxUsable()) {
+          line(label('error', 'bubblewrap が使えません:  sudo apt-get install -y bubblewrap'));
+          return false;
+        }
+        config.sandbox = arg;
+        line(label('ok', describeSandbox(config)));
+        return false;
+      }
+
+      case '/search': {
+        if (!arg) {
+          line(`  組み込み Google 検索: ${agent.searchEnabled ? c.green('有効') : c.dim('無効')}`);
+          return false;
+        }
+        if (arg !== 'on' && arg !== 'off') {
+          line(label('error', 'on か off を指定してください'));
+          return false;
+        }
+        agent.setSearchEnabled(arg === 'on');
+        config.webSearch = arg === 'on' ? 'on' : 'off';
+        line(label('ok', `組み込み Google 検索を${arg === 'on' ? '有効' : '無効'}にしました`));
+        return false;
+      }
+
+      case '/compact': {
+        line(c.dim('  会話履歴を要約しています…'));
+        try {
+          const result = await agent.compact();
+          if (!result) {
+            line(label('info', '圧縮できるだけの履歴がまだありません'));
+          } else {
+            line(label('ok', `${result.removed} メッセージを要約 ${result.summaryChars} 文字に置き換えました`));
+          }
+        } catch (err) {
+          line(label('error', `圧縮に失敗しました: ${err instanceof Error ? err.message : String(err)}`));
+        }
+        return false;
+      }
 
       case '/context': {
         const ctx = loadProjectContext(this.deps.root, config);
@@ -398,6 +515,11 @@ export class Repl {
     );
     line(`  ${c.dim(agent.cwd)}`);
     if (this.deps.gate.auto) line(`  ${c.yellow('承認ゲート OFF (--yolo)')}`);
+    if (config.sandbox !== 'off') line(`  ${c.dim(describeSandbox(config))}`);
+    const connected = this.deps.mcp?.connectedCount ?? 0;
+    if (connected > 0) {
+      line(c.dim(`  MCP: ${connected} サーバー接続中 (${agent.tools.length} ツール)`));
+    }
     line(c.dim('  /help でコマンド一覧 · Ctrl+C で中断 · /exit で終了'));
     line();
   }

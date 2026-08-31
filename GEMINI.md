@@ -1,6 +1,7 @@
 # gema 開発ガイド
 
-WSL/Ubuntu 向けの Gemini コーディングエージェント CLI。TypeScript、Node.js 22 以上、実行時依存は `@google/genai` のみ。
+WSL/Ubuntu 向けの Gemini コーディングエージェント CLI。TypeScript、Node.js 22 以上。
+実行時依存は `@google/genai` と `@modelcontextprotocol/sdk` の 2 つだけ。
 
 ## コマンド
 
@@ -15,8 +16,9 @@ node dist/index.js --help
 ## 設計上の約束
 
 - **実行時依存を増やさない。** 色は `node:util` の `styleText`、対話は `node:readline/promises`、
-  ディレクトリ走査と glob/gitignore は `src/tools/util.ts` に自前実装がある。新しい npm パッケージを足す前に、
-  Node 22 の標準機能で足りないか確認すること。
+  HTTP は global `fetch`、ディレクトリ走査と glob/gitignore は `src/tools/util.ts` に自前実装がある。
+  新しい npm パッケージを足す前に、Node 22 の標準機能で足りないか確認し、必要ならユーザーに相談すること。
+  (`@modelcontextprotocol/sdk` は、ローカル stdio の MCP サーバーに対応するため合意の上で追加した)
 - **API は `client.models.generateContentStream` を使う。** `client.interactions` (NextGen API) は
   Gemini API 専用で Vertex AI では使えないため、両対応を保つ限り採用しない。
 - **既定の認証は Vertex AI + ADC。** 参考元の gem-agent と揃えてある。API キー (`apikey`) は
@@ -29,6 +31,15 @@ node dist/index.js --help
 - **書き込み・実行系のツールは必ず `approval()` を実装する。** 承認キー (`ApprovalRequest.key`) は
   「a (以後自動実行)」の単位になるので、粒度を考えて決めること。
 - **パスは必ず `resolvePath()` を通す。** ワークスペース外へのアクセスをここで一括して弾いている。
+- **画像などは `functionResponse` に入れない。** `FunctionResponsePart` はバックエンドによって扱いが違うため、
+  ツールは `ToolResult.mediaParts` に載せ、`Agent` が functionResponse とは別の user Content として積む。
+- **組み込みツールとの併用は失敗しうる前提で書く。** `googleSearch` は Gemini 3 系でしか関数呼び出しと
+  併用できず、バックエンドによっては拒否される。`webSearch: 'auto'` のときは
+  `isToolCombinationError()` で検知し、検索を外して 1 度だけ自動リトライする。
+- **圧縮の切り出しは「本物のユーザー発言」の直前でのみ行う。** 途中で切ると functionCall と
+  functionResponse の対応が壊れて API に弾かれる (`src/compact.ts` の `userTurnIndexes`)。
+- **MCP の JSON Schema はそのまま渡さない。** `toGeminiSchema()` で変換し、Gemini が解釈できない
+  `$ref` / `additionalProperties` / 合成スキーマは落とすこと。
 
 ## ファイルの役割
 
@@ -39,6 +50,10 @@ node dist/index.js --help
 | `src/agent.ts` | エージェントループ。ストリーム畳み込みとツール往復 |
 | `src/config.ts` | 設定の階層マージ (CLI > env > プロジェクト > ユーザー > 既定)、認証方式の決定、gcloud 既定プロジェクトの検出 |
 | `src/tools/` | ツール実装。`index.ts` の `TOOLS` に登録すると自動でモデルに公開される |
+| `src/mcp.ts` | MCP クライアント。接続したサーバーのツールを `ToolDef` に変換する |
+| `src/compact.ts` | 会話履歴の要約圧縮 |
+| `src/sandbox.ts` | bubblewrap の引数組み立て。`run_command` から使う |
+| `src/media.ts` | 画像・PDF などの inlineData 化 |
 
 ## ツールを追加するとき
 
@@ -62,4 +77,11 @@ printf '/tools\n/config\n/auth\n/exit\n' \
 `--auth apikey` + キーなし。
 
 ツール単体やエージェントループは `client.models.generateContentStream` をモックすれば
-API キーなしで検証できる (会話ログの `scratchpad/agenttest.mjs` が参考になる)。
+API キーなしで検証できる。サンドボックス・MCP・圧縮・メディアはすべてモックなしで検証できる:
+
+- サンドボックス: `sandbox` を切り替えて `run_command` でワークスペース外への書き込みが弾かれるか
+- MCP: `@modelcontextprotocol/sdk` の `McpServer` で最小の stdio サーバーを書いて接続する
+  (**サーバースクリプトは node_modules を解決できる場所に置くこと**。scratchpad に置くと
+  `ERR_MODULE_NOT_FOUND` になる)
+- 圧縮: `loadHistory()` で作った履歴に `compact()` を掛け、functionCall/functionResponse の
+  断片が残っていないことと、先頭が user であることを確認する
