@@ -14,6 +14,17 @@ node dist/index.js --help
 
 変更したら必ず `npm run typecheck` を通すこと。
 
+**package.json の version を上げたら、必ず package-lock.json も同期すること。**
+
+```bash
+npm install --package-lock-only   # lock の version 行を追従させる
+```
+
+これを忘れると、利用者の環境で `npm install` がロックファイルを書き換え、次の `git pull` が
+`your local changes would be overwritten by merge` で止まる。`install.sh` は
+`npm ci` (ロックを書き換えない) を使うようにしてあるが、ロックと package.json が
+食い違っていると `npm ci` 自体が失敗して `npm install` にフォールバックしてしまう。
+
 ## 設計上の約束
 
 - **実行時依存を増やさない。** 色は `node:util` の `styleText`、対話は `node:readline/promises`、

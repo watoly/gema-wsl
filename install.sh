@@ -92,7 +92,19 @@ echo "==> npm  $(command -v npm) (v$(npm -v))"
 echo
 
 echo "==> 依存パッケージをインストール"
-npm install
+# npm ci は package-lock.json を書き換えないため、次回の git pull を壊さない。
+# ロックファイルが package.json と食い違っている場合だけ npm install に落とす。
+if [ -f package-lock.json ]; then
+  if ! npm ci; then
+    warn ""
+    warn "npm ci に失敗したため npm install で再試行します"
+    warn "(package-lock.json が更新され、次回の git pull で競合する場合があります)"
+    warn ""
+    npm install
+  fi
+else
+  npm install
+fi
 
 echo "==> ビルド"
 npm run build
