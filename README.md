@@ -125,6 +125,7 @@ gema --auth apikey            # 一時的に API キーモードで起動
 gema --sandbox                # run_command を隔離して起動
 gema --sandbox read-only --no-network
 gema --no-web-search --no-mcp # 組み込み検索と MCP を切って起動
+gema --telemetry              # Cloud Logging へ利用状況を送る
 ```
 
 入力中に `@src/foo.ts` と書くと、そのファイルの内容が自動で添付されます (Tab で補完できます)。
@@ -146,6 +147,7 @@ gema --no-web-search --no-mcp # 組み込み検索と MCP を切って起動
 | `/sandbox [mode]` | サンドボックスの表示・切替 |
 | `/search [on\|off]` | 組み込み Google 検索の切替 |
 | `/compact` | 会話履歴を要約して圧縮 |
+| `/telemetry` | Cloud Logging へのテレメトリ送信状況 |
 | `/context` | 読み込んだプロジェクト指示ファイル |
 | `/cwd [dir]` | カレントディレクトリの表示・変更 |
 | `/cost` | このセッションのトークン使用量 |
@@ -274,6 +276,101 @@ gema --sandbox                        # = workspace-write
   （stdio サーバーの標準エラー出力も表示されます）
 - 一時的に全部切るなら `--no-mcp`、個別に切るなら設定の `"disabled": true`
 
+## テレメトリ (Cloud Logging)
+
+利用状況を GCP の Cloud Logging に送れます。監査ログとして残したい場合に使います。
+
+### 事前準備
+
+送信先プロジェクトで Cloud Logging API を有効化し、**ADC のアカウントに書き込み権限を付けます**。
+
+```bash
+PROJECT=<your-project-id>
+
+# 1) Cloud Logging API を有効化
+gcloud services enable logging.googleapis.com --project=$PROJECT
+
+# 2) ADC のアカウントを確認
+gcloud auth list
+
+# 3) そのアカウントに Cloud Logging への書き込み権限を付与
+gcloud projects add-iam-policy-binding $PROJECT \
+  --member="user:<上で確認したアカウント>" \
+  --role="roles/logging.logWriter"
+```
+
+サービスアカウントで動かす場合は `--member="serviceAccount:<sa>@$PROJECT.iam.gserviceaccount.com"` にしてください。
+必要な IAM 権限は `logging.logEntries.create` です。
+
+### 有効化
+
+```bash
+gema --telemetry                          # 一時的に
+gema --telemetry-project other-project    # 送信先を明示
+```
+
+恒久的に有効にするなら設定ファイルに書きます。
+
+```json
+{
+  "telemetry": {
+    "enabled": true,
+    "project": "",
+    "logName": "gema",
+    "failOpen": false,
+    "logPrompts": false,
+    "logToolArgs": true
+  }
+}
+```
+
+`project` が空なら認証設定のプロジェクト（= `gcloud` の既定プロジェクト）に送ります。
+環境変数 `GEMA_TELEMETRY=true` / `GEMA_TELEMETRY_PROJECT` / `GEMA_TELEMETRY_LOG` でも指定できます。
+
+### 起動時の検証と fail-closed
+
+テレメトリを有効にすると、**起動時に `dryRun` の書き込みで API の有効化状況と権限を確認します。**
+不足していれば、そのまま実行できる対処コマンドを表示して**起動を中止します**。
+
+```
+✖ Cloud Logging への書き込み権限がありません (プロジェクト my-proj)。
+  ADC のアカウントに roles/logging.logWriter を付与してください。
+
+  gcloud auth list          # ADC で使っているアカウントを確認
+  gcloud projects add-iam-policy-binding my-proj \
+    --member="user:<ADC で使ったアカウント>" \
+    --role="roles/logging.logWriter"
+```
+
+「テレメトリが出せないなら動かさない」という監査要件に合わせて既定は fail-closed です。
+警告だけ出して続行したい場合は `telemetry.failOpen` を `true` にしてください。
+
+### 記録される内容
+
+| イベント | 内容 |
+| --- | --- |
+| `session_start` / `session_end` | バージョン、モデル、認証方式、作業ディレクトリ、サンドボックス設定、MCP 接続状況、所要時間 |
+| `turn_start` / `turn_end` | 入力文字数、添付数、往復回数、所要時間 |
+| `model_request` / `model_usage` | モデル、トークン数 (入力 / 出力 / 思考 / 合計) |
+| `tool_call` | ツール名、結果 (ok / error / denied)、所要時間、引数 |
+| `context_compacted` | 圧縮したメッセージ数 |
+| `error` / `max_iterations` / `builtin_search_disabled` | 失敗の内容 |
+
+すべてのエントリに `session_id` / `host` / `os_user` のラベルが付きます。
+
+**プライバシー**: ユーザー入力とモデル応答の本文は既定では送りません（`logPrompts: true` で有効化）。
+ツール引数は既定で送りますが（`logToolArgs`）、`api_key` / `token` / `secret` / `password` /
+`authorization` などのキーは自動的に `[REDACTED]` に置換し、長い値は 2000 文字で切り詰めます。
+
+### 確認方法
+
+```bash
+gcloud logging read 'logName="projects/<project>/logs/gema"' --limit=20 --project=<project>
+```
+
+`/telemetry` でセッション中の送信状況を確認できます。送信に失敗した場合は警告を出して
+テレメトリだけ停止し、エージェント本体の動作は止めません。
+
 ## 設定ファイル
 
 優先順位: **CLI 引数 > 環境変数 > `<プロジェクト>/.gema/config.json` > `~/.config/gema/config.json` > 既定値**
@@ -293,6 +390,8 @@ mkdir -p ~/.config/gema && cp .gema/config.example.json ~/.config/gema/config.js
 | `GEMINI_API_KEY` / `GOOGLE_API_KEY` | Gemini API キー |
 | `GEMA_MODEL` | 既定モデル |
 | `GEMA_THINKING` | `MINIMAL` / `LOW` / `MEDIUM` / `HIGH` |
+| `GEMA_TELEMETRY` | `true` で Cloud Logging へのテレメトリを有効化 |
+| `GEMA_TELEMETRY_PROJECT` / `GEMA_TELEMETRY_LOG` | テレメトリの送信先プロジェクトとログ ID |
 
 ## プロジェクト指示ファイル
 
@@ -387,6 +486,7 @@ src/
 ├── mcp.ts          MCP クライアント、JSON Schema → Gemini Schema 変換
 ├── compact.ts      会話履歴の要約圧縮
 ├── sandbox.ts      bubblewrap によるコマンド隔離
+├── telemetry.ts    Cloud Logging への利用状況送信
 ├── ui.ts           色・スピナー・ストリーミング Markdown
 └── tools/          read_file / list_dir / glob / grep / view_media
                     edit_file / write_file / run_command / web_fetch
@@ -397,7 +497,7 @@ src/
 対話 REPL、ストリーミング応答、ファイル操作・検索・シェル実行、承認ゲート、セッション保存と復元、
 スラッシュコマンド、Tab 補完、`@file` 添付、プロジェクト指示ファイル、Vertex AI (既定) と API キーの切り替え、
 Web 検索・取得、マルチモーダル入力 (画像 / PDF / 音声 / 動画)、MCP サーバー連携 (stdio + リモート HTTP)、
-コンテキストの自動圧縮、bubblewrap によるサンドボックス実行。
+コンテキストの自動圧縮、bubblewrap によるサンドボックス実行、Cloud Logging へのテレメトリ送信。
 
 参考にした gem-agent との主な違いは、動作環境 (WSL/Linux 対応)、実装言語 (Go → TypeScript)、
 サンドボックスの方式 (Seatbelt → bubblewrap)、そして API キー認証にも対応している点です。

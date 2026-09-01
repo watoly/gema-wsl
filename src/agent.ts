@@ -15,6 +15,7 @@ import type { GemaConfig } from './config.js';
 import type { McpManager } from './mcp.js';
 import { buildSystemInstruction } from './prompt.js';
 import type { SessionLog } from './session.js';
+import type { Telemetry } from './telemetry.js';
 import { TOOLS } from './tools/index.js';
 import { ToolError, type ToolContext, type ToolDef, type ToolResult } from './tools/types.js';
 
@@ -47,6 +48,7 @@ export interface AgentDeps {
   cwd: string;
   session: SessionLog | null;
   mcp: McpManager | null;
+  telemetry: Telemetry | null;
   log: (text: string) => void;
 }
 
@@ -132,6 +134,18 @@ export class Agent {
   async *send(parts: Part[], signal: AbortSignal): AsyncGenerator<AgentEvent> {
     this.push({ role: 'user', parts });
 
+    const telemetry = this.deps.telemetry;
+    const turnStarted = Date.now();
+    const inputText = parts.map((p) => p.text ?? '').join('');
+    telemetry?.event('turn_start', {
+      model: this.config.model,
+      input_chars: inputText.length,
+      attachments: parts.filter((p) => p.inlineData).length,
+      history_messages: this.history.length,
+      search_enabled: this.builtinSearchEnabled,
+      ...(this.config.telemetry.logPrompts ? { prompt: inputText } : {}),
+    });
+
     for (let iteration = 0; iteration < this.config.maxIterations; iteration++) {
       if (signal.aborted) {
         yield { type: 'aborted' };
@@ -142,6 +156,13 @@ export class Agent {
       let stream: AsyncGenerator<GenerateContentResponse> | null = null;
       for (let attempt = 0; attempt < 2 && stream === null; attempt++) {
         try {
+          telemetry?.event('model_request', {
+            model: this.config.model,
+            iteration,
+            attempt,
+            search_enabled: this.builtinSearchEnabled,
+            tool_count: this.tools.length,
+          });
           stream = await this.deps.client.models.generateContentStream({
             model: this.config.model,
             contents: this.history,
@@ -151,6 +172,7 @@ export class Agent {
           const raw = err instanceof Error ? err.message : String(err);
           if (this.builtinSearchEnabled && this.config.webSearch === 'auto' && isToolCombinationError(raw)) {
             this.builtinSearchEnabled = false;
+            telemetry?.event('builtin_search_disabled', { model: this.config.model, reason: raw.slice(0, 300) }, 'WARNING');
             yield {
               type: 'notice',
               message:
@@ -159,6 +181,7 @@ export class Agent {
             };
             continue; // 検索なしで一度だけやり直す
           }
+          telemetry?.event('error', { phase: 'request', model: this.config.model, message: raw.slice(0, 1000) }, 'ERROR');
           yield { type: 'error', message: explainApiError(this.config, err) };
           return;
         }
@@ -188,6 +211,16 @@ export class Agent {
       }
 
       this.accountUsage(lastUsage);
+      if (lastUsage) {
+        telemetry?.event('model_usage', {
+          model: this.config.model,
+          iteration,
+          prompt_tokens: lastUsage.promptTokenCount ?? 0,
+          output_tokens: lastUsage.candidatesTokenCount ?? 0,
+          thoughts_tokens: lastUsage.thoughtsTokenCount ?? 0,
+          total_tokens: lastUsage.totalTokenCount ?? 0,
+        });
+      }
       if (modelParts.length > 0) this.push({ role: 'model', parts: modelParts });
 
       const sources = extractSources(grounding);
@@ -199,6 +232,7 @@ export class Agent {
         return;
       }
       if (sawStreamError) {
+        telemetry?.event('error', { phase: 'stream', message: sawStreamError.slice(0, 1000) }, 'ERROR');
         yield { type: 'error', message: sawStreamError };
         return;
       }
@@ -208,6 +242,15 @@ export class Agent {
         .filter((fc): fc is FunctionCall => Boolean(fc?.name));
 
       if (calls.length === 0) {
+        telemetry?.event('turn_end', {
+          model: this.config.model,
+          duration_ms: Date.now() - turnStarted,
+          iterations: iteration + 1,
+          session_total_tokens: this.usage.total,
+          ...(this.config.telemetry.logPrompts
+            ? { response: modelParts.map((p) => (p.thought ? '' : (p.text ?? ''))).join('') }
+            : {}),
+        });
         yield { type: 'turn_end', usage: this.usage };
         return;
       }
@@ -221,7 +264,22 @@ export class Agent {
         const args = (call.args ?? {}) as Record<string, unknown>;
         yield { type: 'tool_call', name, args };
 
+        const startedAt = Date.now();
         const outcome = await this.runTool(name, args, signal);
+        telemetry?.event(
+          'tool_call',
+          {
+            tool: name,
+            outcome: outcome.kind === 'denied' ? 'denied' : outcome.result.isError ? 'error' : 'ok',
+            duration_ms: Date.now() - startedAt,
+            sandbox: name === 'run_command' ? this.config.sandbox : undefined,
+            ...(this.config.telemetry.logToolArgs ? { args } : {}),
+            ...(outcome.kind === 'ok' && outcome.result.isError
+              ? { error: outcome.result.output.slice(0, 500) }
+              : {}),
+          },
+          outcome.kind === 'denied' ? 'NOTICE' : outcome.kind === 'ok' && outcome.result.isError ? 'WARNING' : 'INFO',
+        );
         if (outcome.kind === 'denied') {
           yield { type: 'tool_denied', name, reason: outcome.reason };
           responseParts.push(this.toResponsePart(call, { error: outcome.reason }));
@@ -251,6 +309,7 @@ export class Agent {
       if (mediaParts.length > 0) this.push({ role: 'user', parts: mediaParts });
     }
 
+    telemetry?.event('max_iterations', { limit: this.config.maxIterations }, 'WARNING');
     yield {
       type: 'error',
       message: `ツール実行が ${this.config.maxIterations} 往復に達したため打ち切りました。指示を分割するか、maxIterations を増やしてください。`,
@@ -291,6 +350,10 @@ export class Agent {
     if (!outcome) return null;
     this.history = outcome.history;
     this.lastPromptTokens = 0;
+    this.deps.telemetry?.event('context_compacted', {
+      removed_messages: outcome.removed,
+      summary_chars: outcome.summary.length,
+    });
     this.deps.session?.appendNote(`[compact] ${outcome.removed} メッセージを要約に置き換えました`);
     for (const content of outcome.history.slice(0, 2)) this.deps.session?.appendContent(content);
     return { removed: outcome.removed, summaryChars: outcome.summary.length };

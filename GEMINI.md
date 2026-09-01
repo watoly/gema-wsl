@@ -1,7 +1,8 @@
 # gema 開発ガイド
 
 WSL/Ubuntu 向けの Gemini コーディングエージェント CLI。TypeScript、Node.js 22 以上。
-実行時依存は `@google/genai` と `@modelcontextprotocol/sdk` の 2 つだけ。
+実行時依存は `@google/genai` / `@modelcontextprotocol/sdk` / `google-auth-library` の 3 つだけ
+(`google-auth-library` は @google/genai の依存でもあり、テレメトリの ADC 認証に直接使っている)。
 
 ## コマンド
 
@@ -40,6 +41,14 @@ node dist/index.js --help
   functionResponse の対応が壊れて API に弾かれる (`src/compact.ts` の `userTurnIndexes`)。
 - **MCP の JSON Schema はそのまま渡さない。** `toGeminiSchema()` で変換し、Gemini が解釈できない
   `$ref` / `additionalProperties` / 合成スキーマは落とすこと。
+- **テレメトリはエージェント本体を止めない。** `Telemetry.event()` は同期で積むだけ、送信は非同期。
+  送信に失敗したら警告を出して自身を停止する (再試行して詰まらせない)。唯一の例外は起動時の
+  検証で、ここは既定で fail-closed (`telemetry.failOpen: false`) にして起動を中止する。
+- **テレメトリに新しい項目を足すときは `redact()` を通す。** `event()` が自動で通すので、
+  payload に生の値を入れてよい。`api_key` / `token` / `secret` 等のキーは自動でマスクされる。
+  プロンプト本文は `telemetry.logPrompts` が true のときだけ載せること。
+- **入れ子の設定オブジェクトは `loadConfig` で個別にマージする。** 浅いマージだと部分指定で
+  既定値が消える (`telemetry` がその例)。新しく入れ子の設定を足すときは同じ扱いにすること。
 
 ## ファイルの役割
 
@@ -54,6 +63,7 @@ node dist/index.js --help
 | `src/compact.ts` | 会話履歴の要約圧縮 |
 | `src/sandbox.ts` | bubblewrap の引数組み立て。`run_command` から使う |
 | `src/media.ts` | 画像・PDF などの inlineData 化 |
+| `src/telemetry.ts` | Cloud Logging への送信。ADC 認証、バッチ、秘匿値のマスク |
 
 ## ツールを追加するとき
 
@@ -85,3 +95,6 @@ API キーなしで検証できる。サンドボックス・MCP・圧縮・メ�
   `ERR_MODULE_NOT_FOUND` になる)
 - 圧縮: `loadHistory()` で作った履歴に `compact()` を掛け、functionCall/functionResponse の
   断片が残っていないことと、先頭が user であることを確認する
+- テレメトリ: `Telemetry` を作って `auth` / `project` を差し替え、`globalThis.fetch` を
+  モックすれば GCP なしでリクエストの中身・バッチ・失敗時の停止を検証できる。
+  エラーの対処手順は `explain()` に各種メッセージを渡して確認する

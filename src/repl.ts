@@ -10,6 +10,7 @@ import { loadProjectContext } from './prompt.js';
 import type { McpManager } from './mcp.js';
 import { describeSandbox, sandboxUsable } from './sandbox.js';
 import { listSessions, readSessionFile, type SessionLog } from './session.js';
+import type { Telemetry } from './telemetry.js';
 import { expandHome, isInside } from './tools/util.js';
 import type { ApprovalDecision, ApprovalRequest } from './tools/types.js';
 import { StreamingMarkdown, c, label, line, out, truncate } from './ui.js';
@@ -27,6 +28,7 @@ const COMMANDS: { name: string; args?: string; help: string }[] = [
   { name: '/sandbox', args: '[mode]', help: 'サンドボックスの表示・切替 (off/workspace-write/read-only)' },
   { name: '/search', args: '[on|off]', help: '組み込み Google 検索の表示・切替' },
   { name: '/compact', help: '会話履歴を要約して圧縮' },
+  { name: '/telemetry', help: 'Cloud Logging へのテレメトリ送信状況' },
   { name: '/context', help: '読み込んだプロジェクト指示ファイルを表示' },
   { name: '/cwd', args: '[dir]', help: 'カレントディレクトリの表示・変更' },
   { name: '/cost', help: 'このセッションのトークン使用量' },
@@ -45,6 +47,7 @@ export interface ReplDeps {
   root: string;
   session: SessionLog | null;
   mcp: McpManager | null;
+  telemetry: Telemetry | null;
 }
 
 export class Repl {
@@ -300,6 +303,10 @@ export class Repl {
         line();
         for (const [k, v] of Object.entries(config)) {
           if (k === 'apiKey' || k.startsWith('_')) continue;
+          if (v && typeof v === 'object' && !Array.isArray(v)) {
+            line(`  ${c.cyan(k.padEnd(22))} ${JSON.stringify(v)}`);
+            continue;
+          }
           line(`  ${c.cyan(k.padEnd(22))} ${Array.isArray(v) ? v.join(', ') : String(v)}`);
         }
         line();
@@ -369,6 +376,29 @@ export class Repl {
         agent.setSearchEnabled(arg === 'on');
         config.webSearch = arg === 'on' ? 'on' : 'off';
         line(label('ok', `組み込み Google 検索を${arg === 'on' ? '有効' : '無効'}にしました`));
+        return false;
+      }
+
+      case '/telemetry': {
+        const telemetry = this.deps.telemetry;
+        const t = config.telemetry;
+        line();
+        if (!t.enabled) {
+          line(`  テレメトリ: ${c.dim('無効')}`);
+          line(c.dim('  --telemetry を付けて起動するか、設定の telemetry.enabled を true にしてください。'));
+          line(c.dim('  事前に Cloud Logging API の有効化と roles/logging.logWriter の付与が必要です。'));
+        } else if (telemetry?.active) {
+          line(`  テレメトリ: ${c.green('送信中')}`);
+          line(`  ${c.cyan('プロジェクト'.padEnd(14))} ${telemetry.targetProject}`);
+          line(`  ${c.cyan('ログ名'.padEnd(16))} projects/${telemetry.targetProject}/logs/${t.logName}`);
+          line(`  ${c.cyan('プロンプト記録'.padEnd(12))} ${t.logPrompts ? 'あり' : 'なし'}`);
+          line(`  ${c.cyan('ツール引数記録'.padEnd(12))} ${t.logToolArgs ? 'あり' : 'なし'}`);
+          line(c.dim(`  確認: gcloud logging read 'logName="projects/${telemetry.targetProject}/logs/${t.logName}"' --limit=20 --project=${telemetry.targetProject}`));
+        } else {
+          line(`  テレメトリ: ${c.yellow('有効だが停止中')}`);
+          line(c.dim('  送信エラーで停止したか、起動時の検証に失敗しています。'));
+        }
+        line();
         return false;
       }
 
@@ -519,6 +549,9 @@ export class Repl {
     const connected = this.deps.mcp?.connectedCount ?? 0;
     if (connected > 0) {
       line(c.dim(`  MCP: ${connected} サーバー接続中 (${agent.tools.length} ツール)`));
+    }
+    if (this.deps.telemetry?.active) {
+      line(c.dim(`  テレメトリ: Cloud Logging (${this.deps.telemetry.targetProject})`));
     }
     line(c.dim('  /help でコマンド一覧 · Ctrl+C で中断 · /exit で終了'));
     line();

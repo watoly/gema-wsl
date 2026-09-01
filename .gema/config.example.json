@@ -55,5 +55,20 @@
     }
   },
 
+  "_telemetry": "利用状況を GCP の Cloud Logging に送る。事前に logging.googleapis.com の有効化と roles/logging.logWriter の付与が必要",
+  "telemetry": {
+    "enabled": false,
+    "_project": "空なら認証設定の project (= gcloud の既定プロジェクト) に送る",
+    "project": "",
+    "logName": "gema",
+    "_failOpen": "false = テレメトリを開始できなければ gema を起動しない (監査用途向けの既定)",
+    "failOpen": false,
+    "_logPrompts": "true にするとユーザー入力とモデル応答の本文も記録する",
+    "logPrompts": false,
+    "logToolArgs": true,
+    "flushIntervalMs": 10000,
+    "maxBatch": 100
+  },
+
   "contextFileNames": ["GEMINI.md", "AGENTS.md", "CLAUDE.md", ".gema/instructions.md"]
 }

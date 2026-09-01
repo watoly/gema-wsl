@@ -19,11 +19,12 @@ import { expandMentions } from './mentions.js';
 import { Repl } from './repl.js';
 import { describeSandbox, sandboxUsable } from './sandbox.js';
 import { SessionLog, listSessions, readSessionFile } from './session.js';
+import { Telemetry, TelemetryError } from './telemetry.js';
 import type { ApprovalDecision, ApprovalRequest } from './tools/types.js';
 import { expandHome } from './tools/util.js';
 import { StreamingMarkdown, c, errLine, label, line, out } from './ui.js';
 
-const VERSION = '0.2.0';
+const VERSION = '0.3.0';
 
 const HELP = `
 ${c.bold('gema')} — WSL / Ubuntu 向け Gemini コーディングエージェント  v${VERSION}
@@ -50,12 +51,23 @@ ${c.bold('オプション')}
       --no-web-search         組み込みの Google 検索を使わない
       --no-compact            コンテキストの自動圧縮を無効化
       --no-mcp                MCP サーバーに接続しない
+      --telemetry             Cloud Logging へ利用状況を送る
+      --telemetry-project <p> テレメトリの送信先 GCP プロジェクト
+      --no-telemetry          テレメトリを送らない
       --continue              直近のセッションを復元して起動
       --resume <n>            n 番目のセッションを復元 (--sessions で確認)
       --sessions              保存済みセッション一覧を表示して終了
       --no-session            セッションログを保存しない
   -h, --help                  このヘルプ
   -v, --version               バージョン
+
+${c.bold('テレメトリ')}
+  --telemetry を付けると、利用状況を GCP の Cloud Logging に送ります。事前に:
+    gcloud services enable logging.googleapis.com --project=<project>
+    gcloud projects add-iam-policy-binding <project> \\
+      --member="user:<ADC のアカウント>" --role="roles/logging.logWriter"
+  権限や API 有効化が不足している場合は、起動時に対処コマンドを表示して停止します
+  (telemetry.failOpen を true にすると警告のみで続行)。
 
 ${c.bold('認証')}
   既定は Vertex AI + ADC です。事前に以下を済ませてください。
@@ -167,6 +179,19 @@ function parseArgs(argv: string[]): Cli {
       case '--no-mcp':
         cli.noMcp = true;
         break;
+      case '--telemetry':
+        cli.overrides.telemetry = { ...(cli.overrides.telemetry ?? {}), enabled: true } as GemaConfig['telemetry'];
+        break;
+      case '--no-telemetry':
+        cli.overrides.telemetry = { ...(cli.overrides.telemetry ?? {}), enabled: false } as GemaConfig['telemetry'];
+        break;
+      case '--telemetry-project':
+        cli.overrides.telemetry = {
+          ...(cli.overrides.telemetry ?? {}),
+          enabled: true,
+          project: next(),
+        } as GemaConfig['telemetry'];
+        break;
       case '--continue':
         cli.resumeIndex = 0;
         break;
@@ -210,6 +235,8 @@ async function readStdin(): Promise<string> {
   return Buffer.concat(chunks).toString('utf8').trim();
 }
 
+let agentRef: Agent | null = null;
+
 async function main(): Promise<void> {
   const cli = parseArgs(process.argv.slice(2));
 
@@ -249,13 +276,42 @@ async function main(): Promise<void> {
     errLine(label('warn', describeSandbox(config)));
   }
 
+  // テレメトリは MCP やモデル呼び出しより先に立ち上げ、失敗したら既定では起動を止める
+  const telemetry = new Telemetry(config, session?.meta.id ?? `nolog-${Date.now()}`, (message) =>
+    errLine(label('warn', message)),
+  );
+  try {
+    await telemetry.start();
+    if (telemetry.active) {
+      errLine(
+        c.dim(`  テレメトリ: Cloud Logging へ送信中 (project=${telemetry.targetProject}, log=${config.telemetry.logName})`),
+      );
+    }
+  } catch (err) {
+    if (err instanceof TelemetryError) {
+      errLine(label('error', err.message));
+      if (err.remediation) errLine(err.remediation);
+      if (!config.telemetry.failOpen) {
+        errLine('');
+        errLine(c.dim('テレメトリなしで起動するには --no-telemetry を付けてください。'));
+        process.exit(1);
+      }
+      errLine(label('warn', 'telemetry.failOpen が true のため、テレメトリなしで続行します。'));
+    } else {
+      throw err;
+    }
+  }
+
   const mcp = cli.noMcp ? null : new McpManager();
   if (mcp) {
     await mcp.connectAll(config, (text) => errLine(c.dim(`  ${text}`)));
   }
-  const shutdownMcp = async () => {
+  const shutdown = async () => {
     await mcp?.close();
+    telemetry.event('session_end', { duration_ms: Date.now() - startedAt, usage: agentRef?.usage });
+    await telemetry.shutdown();
   };
+  const startedAt = Date.now();
 
   // ApprovalGate は Repl に依存し、Repl は Agent に依存するため、遅延バインドで循環を解く
   const asker: { ask: (req: ApprovalRequest) => Promise<ApprovalDecision> } = {
@@ -271,7 +327,22 @@ async function main(): Promise<void> {
     cwd,
     session,
     mcp,
+    telemetry,
     log: (text) => line(c.dim(`    ${text}`)),
+  });
+  agentRef = agent;
+
+  telemetry.event('session_start', {
+    version: VERSION,
+    model: config.model,
+    auth: config.auth,
+    project: config.project,
+    root,
+    cwd,
+    sandbox: config.sandbox,
+    web_search: config.webSearch,
+    mcp_servers: mcp?.status.map((s2) => ({ name: s2.name, connected: s2.connected, tools: s2.toolCount })) ?? [],
+    mode: cli.print ? 'print' : 'interactive',
   });
 
   if (cli.resumeIndex !== undefined) {
@@ -296,17 +367,17 @@ async function main(): Promise<void> {
     try {
       await runOnce(agent, gate, oneShotPrompt, config);
     } finally {
-      await shutdownMcp();
+      await shutdown();
     }
     return;
   }
 
-  const repl = new Repl({ agent, gate, config, root, session, mcp });
+  const repl = new Repl({ agent, gate, config, root, session, mcp, telemetry });
   asker.ask = (req) => repl.ask(req);
   try {
     await repl.run();
   } finally {
-    await shutdownMcp();
+    await shutdown();
   }
 }
 

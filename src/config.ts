@@ -6,6 +6,26 @@ import { join } from 'node:path';
 export type AuthMode = 'apikey' | 'vertex';
 export type ThinkLevel = 'MINIMAL' | 'LOW' | 'MEDIUM' | 'HIGH';
 export type WebSearchMode = 'auto' | 'on' | 'off';
+
+/** Cloud Logging へ利用状況を送るテレメトリの設定 */
+export interface TelemetryConfig {
+  enabled: boolean;
+  /** 送信先 GCP プロジェクト。空なら認証設定の project を使う */
+  project?: string;
+  /** Cloud Logging のログ ID (logName の末尾) */
+  logName: string;
+  /**
+   * false のとき、テレメトリを開始できなければ gema 自体を起動しない。
+   * 監査目的で「テレメトリ必須」にする運用のため既定は false (fail-closed)。
+   */
+  failOpen: boolean;
+  /** ユーザー入力とモデル応答の本文も記録する */
+  logPrompts: boolean;
+  /** ツール呼び出しの引数を記録する */
+  logToolArgs: boolean;
+  flushIntervalMs: number;
+  maxBatch: number;
+}
 export type SandboxMode = 'off' | 'workspace-write' | 'read-only';
 
 /** MCP サーバー 1 台分の設定。command 指定なら stdio、url 指定ならリモート HTTP。 */
@@ -91,6 +111,9 @@ export interface GemaConfig {
 
   // ── MCP ──────────────────────────────────────────────────────
   mcpServers: Record<string, McpServerConfig>;
+
+  // ── テレメトリ ────────────────────────────────────────────────
+  telemetry: TelemetryConfig;
 }
 
 export const DEFAULT_MODEL = 'gemini-3.7-flash';
@@ -144,6 +167,16 @@ const DEFAULTS: GemaConfig = {
   sandboxWritablePaths: ['~/.npm', '~/.cache', '~/.config/gcloud'],
 
   mcpServers: {},
+
+  telemetry: {
+    enabled: false,
+    logName: 'gema',
+    failOpen: false,
+    logPrompts: false,
+    logToolArgs: true,
+    flushIntervalMs: 10_000,
+    maxBatch: 100,
+  },
 };
 
 export function userConfigDir(): string {
@@ -231,6 +264,13 @@ export function loadConfig(cwd: string, overrides: Partial<GemaConfig> = {}): {
     thinkingLevel: process.env['GEMA_THINKING'] as ThinkLevel | undefined,
   });
 
+  const telemetryEnv = envBool('GEMA_TELEMETRY');
+  const fromEnvTelemetry = stripUndefined({
+    enabled: telemetryEnv,
+    project: process.env['GEMA_TELEMETRY_PROJECT'],
+    logName: process.env['GEMA_TELEMETRY_LOG'],
+  }) as Partial<TelemetryConfig>;
+
   const userJson = readJson(userConfigPath);
   const projectJson = readJson(projectConfigPath);
   const config: GemaConfig = {
@@ -239,6 +279,14 @@ export function loadConfig(cwd: string, overrides: Partial<GemaConfig> = {}): {
     ...projectJson,
     ...fromEnv,
     ...stripUndefined(overrides),
+    // 入れ子オブジェクトは浅いマージだと既定値が消えるので個別に重ねる
+    telemetry: {
+      ...DEFAULTS.telemetry,
+      ...(userJson.telemetry ?? {}),
+      ...(projectJson.telemetry ?? {}),
+      ...(fromEnvTelemetry ?? {}),
+      ...(overrides.telemetry ?? {}),
+    },
   };
 
   // Vertex AI ではプロジェクト ID が必須。未設定なら gcloud の既定プロジェクトを引き継ぐ。

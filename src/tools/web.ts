@@ -87,7 +87,7 @@ export const webFetchTool: ToolDef = {
       response = await fetch(url, {
         signal,
         redirect: 'follow',
-        headers: { 'User-Agent': 'gema/0.2 (+https://github.com/watoly/gema-wsl)', Accept: '*/*' },
+        headers: { 'User-Agent': 'gema/0.3 (+https://github.com/watoly/gema-wsl)', Accept: '*/*' },
       });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);

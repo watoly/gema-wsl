@@ -145,7 +145,7 @@ export class McpManager {
   }
 
   private async connectOne(name: string, serverConfig: McpServerConfig, log: (text: string) => void): Promise<void> {
-    const client = new Client({ name: 'gema', version: '0.2.0' }, { capabilities: {} });
+    const client = new Client({ name: 'gema', version: '0.3.0' }, { capabilities: {} });
     const timeoutMs = serverConfig.timeoutMs ?? 30_000;
 
     let transport: StdioClientTransport | StreamableHTTPClientTransport;
